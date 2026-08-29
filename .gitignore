@@ -1,4 +1,15 @@
 .env
+.env.*
+!.env.example
+secrets.env
+credentials.json
+service-account.json
+id_rsa
+id_ed25519
+*.pem
+*.key
+*.p12
+*.pfx
 .venv/
 venv/
 __pycache__/
@@ -32,6 +43,10 @@ samples/_generated/
 *.db
 *.db-wal
 *.db-shm
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
 .idea/
 .vscode/
 .a0proj/
@@ -40,3 +55,6 @@ samples/_generated/
 dist/
 *.tar
 *.tar.sha256
+*.tar.gz
+*.tgz
+*.zip
