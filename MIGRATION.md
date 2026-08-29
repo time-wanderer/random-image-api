@@ -35,7 +35,7 @@
 cd /path/to/random-image-api
 docker compose ps
 docker compose logs --tail=100
-curl -sS http://127.0.0.1:${APP_PORT:-8080}/health
+curl -sS http://127.0.0.1:${APP_PORT:-10086}/health
 ```
 
 确认 `status` 为 `ok`，记下图片数量。
@@ -166,8 +166,8 @@ docker compose logs --tail=100
 ### 6. 验证
 
 ```bash
-curl -sS http://127.0.0.1:${APP_PORT:-8080}/health
-curl -D - -o /tmp/mig.bin http://127.0.0.1:${APP_PORT:-8080}/random
+curl -sS http://127.0.0.1:${APP_PORT:-10086}/health
+curl -D - -o /tmp/mig.bin http://127.0.0.1:${APP_PORT:-10086}/random
 file /tmp/mig.bin
 ```
 

@@ -143,9 +143,9 @@ docker load -i dist/random-image-api-v1.0.0.tar
 | --- | --- | --- |
 | `IMAGE_NAME` | Docker 镜像名称 | `random-image-api` |
 | `IMAGE_TAG` | Docker 镜像标签 | `local` |
-| `APP_PORT` | 宿主机映射端口 | `8080` |
+| `APP_PORT` | 宿主机映射端口 | `10086` |
 | `APP_HOST` | 监听地址 | `0.0.0.0` |
-| `APP_BIND_PORT` | 容器内端口，保持 `8080` | `8080` |
+| `APP_BIND_PORT` | 容器内端口，保持 `10086` | `10086` |
 | `DATA_DIR` | 数据根目录 | `./data` |
 | `IMAGES_DIR` | 图片目录 | `./data/images` |
 | `DATABASE_PATH` | SQLite 文件 | `./data/database/images.db` |
@@ -210,7 +210,7 @@ docker compose up -d --force-recreate  # 配置变化后重建容器
 3. 等待最多 `SCAN_INTERVAL_SECONDS`，或在设置了 `ADMIN_TOKEN` 后调用：
 
 ```bash
-curl -X POST -H "X-Admin-Token: <token>" http://127.0.0.1:8080/admin/rescan
+curl -X POST -H "X-Admin-Token: <token>" http://127.0.0.1:10086/admin/rescan
 ```
 
 分类规则：
@@ -270,27 +270,27 @@ curl -X POST -H "X-Admin-Token: <token>" http://127.0.0.1:8080/admin/rescan
 ## Curl 示例
 
 ```bash
-curl -i http://127.0.0.1:8080/health
+curl -i http://127.0.0.1:10086/health
 
-curl -D - -o /tmp/random.bin http://127.0.0.1:8080/random
+curl -D - -o /tmp/random.bin http://127.0.0.1:10086/random
 
 curl -D - -o /tmp/win.jpg \
   -H 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36' \
-  http://127.0.0.1:8080/random
+  http://127.0.0.1:10086/random
 
 curl -D - -o /tmp/android.webp \
   -H 'User-Agent: Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Mobile Safari/537.36' \
-  http://127.0.0.1:8080/random
+  http://127.0.0.1:10086/random
 
 curl -D - -o /tmp/iphone.bin \
   -H 'User-Agent: Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1' \
-  http://127.0.0.1:8080/random
+  http://127.0.0.1:10086/random
 
 curl -D - -o /tmp/force-desktop.jpg \
   -H 'User-Agent: Mozilla/5.0 (Linux; Android 10; K) Mobile Safari/537.36' \
-  'http://127.0.0.1:8080/random?type=desktop'
+  'http://127.0.0.1:10086/random?type=desktop'
 
-curl -i 'http://127.0.0.1:8080/random?type=test'
+curl -i 'http://127.0.0.1:10086/random?type=test'
 ```
 
 ## 数据目录
@@ -337,8 +337,8 @@ RESTORE_CONFIRM=YES ./scripts/restore.sh backups/backup-YYYY-MM-DD-HHMMSS.tar.gz
 
 docker compose up -d
 docker compose ps
-curl -i http://127.0.0.1:8080/health
-curl -D - -o /tmp/restored.bin http://127.0.0.1:8080/random
+curl -i http://127.0.0.1:10086/health
+curl -D - -o /tmp/restored.bin http://127.0.0.1:10086/random
 ```
 
 恢复前会把现有 `data/images` 和 `data/database` 复制到 `backups/pre-restore-<时间>/`。
@@ -374,5 +374,5 @@ curl -D - -o /tmp/restored.bin http://127.0.0.1:8080/random
 python3 -m pip install -r requirements-dev.txt
 python3 scripts/generate_samples.py
 python3 -m pytest tests -q
-python3 -m uvicorn app.main:app --host 127.0.0.1 --port 8080
+python3 -m uvicorn app.main:app --host 127.0.0.1 --port 10086
 ```

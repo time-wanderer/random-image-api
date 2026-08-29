@@ -111,7 +111,7 @@
 Client
   -> (可选反向代理)
     -> docker compose service `api`
-      -> uvicorn app.main:app :8080
+      -> uvicorn app.main:app :10086
         -> Catalog 内存缓存
         -> SQLite WAL: data/database/images.db
         -> files: data/images/**
@@ -158,7 +158,7 @@ Client
 - 容器内强制 `DATA_DIR=/app/data` 等路径，避免把宿主机相对路径带进容器
 - `./data:/app/data` bind mount
 - `restart: unless-stopped`
-- healthcheck 访问 `http://127.0.0.1:8080/health`
+- healthcheck 访问 `http://127.0.0.1:10086/health`
 - 无 `privileged`、无 docker.sock、无 `network_mode: host`
 
 ## 8. 数据持久化设计
@@ -283,7 +283,7 @@ sha256:9bb7afa1bd9d70bde960e59b6f7e386b3d2208c42b67b7a8279e38790051f76b
 已实际执行独立项目的 `docker compose up -d`。最终状态：
 
 ```text
-api-1   Up (healthy)   0.0.0.0:<测试端口>->8080/tcp
+api-1   Up (healthy)   0.0.0.0:<测试端口>->10086/tcp
 ```
 
 启动前记录了服务器原有 8 个容器名称；完整验收后再次比较，名称集合一致，证明测试没有停止、删除或替换原有容器。
@@ -373,6 +373,46 @@ Restore 会先把原数据保存到 `backups/pre-restore-*`。恢复后容器重
 
 ## 23. 已解决的问题
 
+### 10086 端口变更复验（2026-08-29）
+
+为降低与常见 Web 服务端口冲突的概率，应用默认宿主机端口与容器内部监听端口已从 `8080` 统一调整为 `10086`。本次变更不是仅修改文档，已在独立远程 Debian 13 Docker 环境重新完成构建和运行验证：
+
+- `docker compose config -q`：通过；
+- `docker compose build`：成功，新镜像 ID 为 `sha256:065225f542b48b0c41e44a38104427a5a33a45754ed4e...`；
+- 端口映射：`0.0.0.0:10086->10086/tcp`；
+- 容器内部 `127.0.0.1:10086`：连接成功；
+- Docker healthcheck：从 `starting` 变为 `healthy`；
+- `/health`：HTTP 200，SQLite 状态为 `ok`；
+- `/random?type=desktop`：HTTP 200，返回有效 `640x360` JPEG；
+- `/random?type=mobile`：HTTP 200，返回有效 `360x640` WebP；
+- `docker compose restart` 后：恢复 `healthy`，图片和 SQLite 元数据可用；
+- `docker compose down` / `up -d` 后：2 张隔离测试图片与数据库仍存在，API 正常；
+- 应用 PID 1：UID/GID 均为 `1000`，实际命令为 `python -m uvicorn app.main:app --host 0.0.0.0 --port 10086`；
+- 测试前后远程服务器原有容器名称集合一致；测试专属容器和网络已停止并移除。
+
+新版镜像已覆盖发布到：
+
+```text
+qinlingmonkey/random-image-api:v1
+```
+
+Docker Hub Registry digest：
+
+```text
+sha256:f312f7db5e6ca984813b8eb728e6628ea4bfb0d23ffac3420d8e5bd2e3a84216
+```
+
+远程验证镜像已通过 `docker save` 导出并下载，替换本地被 Git 忽略的 `dist/random-image-api-verified.tar`。归档校验结果：
+
+```text
+SHA-256: 547fcb900549b800d9f6b1b6659f75f103174739747d905de089f8c7890895e2
+EXPOSE: 10086/tcp
+APP_BIND_PORT: 10086
+CMD port: 10086
+```
+
+本次复验中，首次在宿主机直接运行 `scripts/generate_samples.py` 因宿主机未安装 Pillow 而失败；未为此修改宿主机环境，改为使用应用容器内已安装的 Pillow 在隔离持久化目录生成测试图片。图片在应用启动扫描后才加入，因此首次 `/random` 返回 404；执行既定 Restart 测试触发启动扫描后，图片计数变为 2，Desktop / Mobile 请求均成功。该过程验证了空元数据时的预期 404、启动扫描、Restart 和持久化行为。
+
 - 内置搜索工具空返回：改用 curl 拉取官方文档；
 - 避免每次请求扫盘：采用 SQLite 元数据与内存缓存；
 - SQLite 热备份风险：改用 `VACUUM INTO`；
@@ -383,6 +423,7 @@ Restore 会先把原数据保存到 `backups/pre-restore-*`。恢复后容器重
 - 固定 `container_name` 不利于并行与隔离部署：移除固定容器名，使用 Compose project 管理命名；
 - 镜像名称原先固定：增加 `IMAGE_NAME` / `IMAGE_TAG` 环境变量；
 - 缺少可分发镜像文件：增加 `scripts/build-image.sh`，执行 build、save、tar 检查和 SHA-256 生成。
+- 默认端口容易与其他服务冲突：应用、Dockerfile、Compose、healthcheck、示例配置和用户文档已统一改为 `10086`，并完成独立 Docker 复验。
 
 ## 24. 未解决的问题
 

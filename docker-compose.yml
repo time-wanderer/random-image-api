@@ -9,13 +9,13 @@ services:
       - .env
     environment:
       APP_HOST: 0.0.0.0
-      APP_BIND_PORT: "8080"
+      APP_BIND_PORT: "10086"
       DATA_DIR: /app/data
       IMAGES_DIR: /app/data/images
       DATABASE_PATH: /app/data/database/images.db
       LOG_DIR: /app/data/logs
     ports:
-      - "${APP_PORT:-8080}:8080"
+      - "${APP_PORT:-10086}:10086"
     volumes:
       - ./data:/app/data
     healthcheck:
@@ -24,7 +24,7 @@ services:
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=4)",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:10086/health', timeout=4)",
         ]
       interval: 15s
       timeout: 5s

@@ -44,7 +44,7 @@ services:
     image: qinlingmonkey/random-image-api:v1
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "10086:10086"
     environment:
       LOG_LEVEL: INFO
       FALLBACK_ENABLED: "true"
@@ -60,7 +60,7 @@ services:
         - CMD
         - python
         - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=4)"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:10086/health', timeout=4)"
       interval: 15s
       timeout: 5s
       retries: 5
@@ -79,8 +79,8 @@ docker compose logs -f
 检查服务：
 
 ```bash
-curl -i http://127.0.0.1:8080/health
-curl -D - -o random-image.bin http://127.0.0.1:8080/random
+curl -i http://127.0.0.1:10086/health
+curl -D - -o random-image.bin http://127.0.0.1:10086/random
 ```
 
 更新镜像：
@@ -129,7 +129,7 @@ data/images/mobile/
 返回服务状态、图片数量和数据库状态。
 
 ```bash
-curl http://127.0.0.1:8080/health
+curl http://127.0.0.1:10086/health
 ```
 
 ### `GET /random`
@@ -137,21 +137,21 @@ curl http://127.0.0.1:8080/health
 根据 User-Agent 自动选择 Desktop 或 Mobile 图片：
 
 ```bash
-curl -D - -o random-image.bin http://127.0.0.1:8080/random
+curl -D - -o random-image.bin http://127.0.0.1:10086/random
 ```
 
 显式指定 Desktop：
 
 ```bash
 curl -D - -o desktop-image.bin \
-  "http://127.0.0.1:8080/random?type=desktop"
+  "http://127.0.0.1:10086/random?type=desktop"
 ```
 
 显式指定 Mobile：
 
 ```bash
 curl -D - -o mobile-image.bin \
-  "http://127.0.0.1:8080/random?type=mobile"
+  "http://127.0.0.1:10086/random?type=mobile"
 ```
 
 非法 `type` 返回 HTTP `400`；没有可用图片时返回 HTTP `404`。

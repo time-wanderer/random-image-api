@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     )
 
     app_host: str = "0.0.0.0"
-    app_bind_port: int = 8080
-    app_port: int = 8080
+    app_bind_port: int = 10086
+    app_port: int = 10086
     data_dir: Path = Path("./data")
     images_dir: Path = Path("./data/images")
     database_path: Path = Path("./data/database/images.db")

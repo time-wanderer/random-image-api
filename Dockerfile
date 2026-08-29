@@ -4,7 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     APP_HOST=0.0.0.0 \
-    APP_BIND_PORT=8080 \
+    APP_BIND_PORT=10086 \
     DATA_DIR=/app/data \
     IMAGES_DIR=/app/data/images \
     DATABASE_PATH=/app/data/database/images.db \
@@ -26,9 +26,9 @@ COPY --chown=appuser:appuser app /app/app
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-EXPOSE 8080
+EXPOSE 10086
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=15s --retries=5 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=4)"
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:10086/health', timeout=4)"
 
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "10086"]
