@@ -1,0 +1,32 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: "${IMAGE_NAME:-random-image-api}:${IMAGE_TAG:-local}"
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_BIND_PORT: "8080"
+      DATA_DIR: /app/data
+      IMAGES_DIR: /app/data/images
+      DATABASE_PATH: /app/data/database/images.db
+      LOG_DIR: /app/data/logs
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=4)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
