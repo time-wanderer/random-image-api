@@ -2,7 +2,19 @@
 
 可长期运行的随机图片服务。根据客户端 `User-Agent` 自动判断 Desktop / Mobile，优先返回横屏或竖屏图片，也支持 `type=desktop` / `type=mobile` 显式指定。
 
-项目按单机、可迁移、可备份恢复的目标设计：一个 FastAPI 进程 + SQLite 元数据 + 本地图片目录 + Docker Compose。
+项目按单机、可迁移、可备份恢复的目标设计：FastAPI + SQLite + 本地永久图库 + 可选 WebDAV 扩展图库 + Docker Compose。
+
+## 快速导航
+
+| 目标 | 建议阅读 |
+| --- | --- |
+| 直接使用已发布镜像 | [Docker Hub 镜像快速部署](#docker-hub-镜像快速部署) |
+| 从 GitHub 源码构建 | [从源码部署](#从源码部署) |
+| 手工添加本地图片 | [图片添加方式](#图片添加方式) |
+| 使用 WebDAV 扩展图库 | [WebDAV Hybrid 与混合压缩包](#webdav-hybrid-与混合压缩包) |
+| 导入目录混乱的压缩包 | [导入目录混乱的压缩包](#导入目录混乱的压缩包) |
+| 备份或恢复 | [Backup](#backup) / [Restore](#restore) |
+| 迁移到新 VPS | [MIGRATION.md](MIGRATION.md) |
 
 ## 功能列表
 
@@ -17,6 +29,9 @@
 - 访问日志：时间、路径、客户端类型、状态码、返回图片、耗时、代理感知 IP
 - SQLite 元数据缓存，避免每次请求全盘扫描
 - Docker Compose 部署、bind mount 持久化、Backup / Restore
+- 默认本地模式；可选 WebDAV Hybrid，默认 90% 优先远程并支持故障降级
+- WebDAV 只同步轻量索引，远程图片按需缓存、条件刷新、随机轮换和 LRU 淘汰
+- 安全导入 ZIP / TAR.GZ / TGZ 混合图片包，按真实方向分类并去重
 
 ## 技术架构
 
@@ -24,9 +39,10 @@
 Client
   -> Docker Compose (api)
     -> Uvicorn + FastAPI
-      -> 内存图片目录缓存
-      -> SQLite (data/database/images.db)
-      -> 图片文件 (data/images/)
+      -> 本地永久图库 (data/images/)
+      -> SQLite 本地与远程索引 (data/database/images.db)
+      -> 可选 WebDAV desktop/ + mobile/
+      -> 有界远程缓存 (data/cache/webdav/)
 ```
 
 - Web：Python 3.12、FastAPI、Uvicorn
@@ -45,6 +61,8 @@ random-image-api/
 │   ├── main.py            # FastAPI 入口
 │   ├── catalog.py         # 扫描、分类、随机选择、fallback
 │   ├── db.py              # SQLite
+│   ├── webdav.py          # WebDAV 索引、下载、缓存与降级
+│   ├── importer.py        # ZIP / TAR.GZ 安全导入
 │   ├── ua.py              # User-Agent 识别
 │   └── config.py          # 环境变量配置
 ├── tests/
@@ -53,6 +71,7 @@ random-image-api/
 │   │   ├── desktop/
 │   │   └── mobile/
 │   ├── database/
+│   ├── cache/webdav/
 │   └── logs/
 ├── backups/
 ├── scripts/
@@ -81,7 +100,68 @@ random-image-api/
 
 不要在宿主机单独安装业务数据库。不要依赖当前机器的绝对路径、固定 IP 或固定域名。
 
-## Docker Compose 部署
+## Docker Hub 镜像快速部署
+
+适合只想运行服务、不需要修改源码的用户。镜像为 `linux/amd64`：
+
+```bash
+mkdir -p random-image-api/data/images/desktop \
+  random-image-api/data/images/mobile \
+  random-image-api/data/database \
+  random-image-api/data/cache/webdav \
+  random-image-api/data/logs
+cd random-image-api
+# 镜像以 UID/GID 1000 非 Root 运行，数据目录必须可写
+sudo chown -R 1000:1000 data
+```
+
+创建 `compose.yml`：
+
+```yaml
+services:
+  api:
+    image: qinlingmonkey/random-image-api:v1
+    restart: unless-stopped
+    ports:
+      - "10086:10086"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:10086/health', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+```
+
+创建最小 `.env`，并生成不可预测的管理令牌：
+
+```bash
+printf 'ADMIN_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
+chmod 600 .env
+docker compose pull
+docker compose up -d
+docker compose ps
+curl -fsS http://127.0.0.1:10086/health
+```
+
+然后把图片复制到 `data/images/desktop/` 或 `data/images/mobile/`。程序最终仍以图片真实宽高分类；目录名称主要方便人工管理。等待自动扫描，或读取 `.env` 后调用管理接口：
+
+```bash
+set -a; . ./.env; set +a
+curl -fsS -X POST -H "X-Admin-Token: ${ADMIN_TOKEN}" \
+  http://127.0.0.1:10086/admin/rescan
+unset ADMIN_TOKEN
+curl -D - -o random-image.bin http://127.0.0.1:10086/random
+```
+
+完整的镜像部署、WebDAV 和故障排查教程见 [DOCKERHUB_OVERVIEW.md](DOCKERHUB_OVERVIEW.md)。
+
+## 从源码部署
+
+适合需要修改代码、运行测试或自行构建镜像的用户：
 
 ```bash
 cp .env.example .env
