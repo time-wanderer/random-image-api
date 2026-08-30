@@ -44,7 +44,7 @@ if [[ -f "${ROOT_DIR}/.env" ]]; then
 from pathlib import Path
 import sys
 
-sensitive = ("TOKEN", "PASSWORD", "SECRET", "API_KEY", "KEY")
+sensitive = ("TOKEN", "PASSWORD", "USERNAME", "SECRET", "API_KEY", "KEY")
 source = Path(sys.argv[1])
 dest = Path(sys.argv[2])
 lines = []
@@ -65,7 +65,7 @@ cat > "${STAGING_DIR}/MANIFEST.txt" <<EOF
 created_at=${TIMESTAMP}
 source=${ROOT_DIR}
 includes=data/images,data/database/images.db,config/.env.example,config/env.sanitized
-note=Secrets in ADMIN_TOKEN are not stored in this archive.
+note=Secrets (including WebDAV credentials) and data/cache are not stored in this archive.
 EOF
 
 tar -C "${STAGING_DIR}" -czf "${ARCHIVE}" .

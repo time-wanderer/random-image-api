@@ -11,7 +11,11 @@
 - 支持 JPG、JPEG、PNG 和 WebP
 - 自动读取图片宽高并维护 SQLite 元数据
 - 支持分类缺图 fallback、文件缺失及损坏图片处理
-- `GET /health` 提供服务、数据库和图片统计状态
+- 默认使用本地永久图库；可选 WebDAV Hybrid 远程扩展图库
+- Hybrid 默认 90% 优先 WebDAV，远程 401/403、超时或 5xx 时降级到本地图片与有效缓存
+- WebDAV 只同步目录索引，图片按需下载到有容量上限、可刷新轮换的独立缓存
+- 支持安全导入 ZIP / TAR.GZ 混合图片包并按真实方向分类、去重
+- `GET /health` 提供服务、数据库、图片、WebDAV 和缓存状态
 - 图片、SQLite 数据库和日志通过 `/app/data` 持久化
 - 以非 root 用户运行
 - 提供 Docker Compose、Backup、Restore 和 VPS 迁移方案
@@ -172,6 +176,47 @@ curl -D - -o mobile-image.bin \
 | `TRUSTED_PROXY_HEADERS` | `true` | 是否信任反向代理来源请求头 |
 
 Secret 应通过环境变量或 `.env` 注入，不要写进镜像或公开文档。
+
+### WebDAV Hybrid（可选）
+
+默认 `STORAGE_MODE=local`，本地图片仍放在 `/app/data/images` 且永不被缓存维护删除。启用 Hybrid 时，WebDAV 远程目录约定为：
+
+```text
+<WEBDAV_BASE_URL>/desktop/
+<WEBDAV_BASE_URL>/mobile/
+```
+
+Compose 的 `environment` 可增加：
+
+```yaml
+      STORAGE_MODE: hybrid
+      HYBRID_REMOTE_PROBABILITY: "0.9"
+      WEBDAV_BASE_URL: https://dav.example.com/random-image-api
+      WEBDAV_DESKTOP_ROOT: /desktop/
+      WEBDAV_MOBILE_ROOT: /mobile/
+      WEBDAV_ALLOWED_HOSTS: dav.example.com
+      WEBDAV_USERNAME: ${WEBDAV_USERNAME}
+      WEBDAV_PASSWORD: ${WEBDAV_PASSWORD}
+      CACHE_MAX_BYTES: "1073741824"
+      CACHE_MAX_FILES: "2000"
+      CACHE_REFRESH_AFTER_SECONDS: "3600"
+      CACHE_ROTATE_PERCENT: "10"
+```
+
+真实账号和密码放在同目录未公开的 `.env`。应用仅同步远程索引，图片被选中时才按需下载；缓存位于 `/app/data/cache/webdav`，支持 ETag / Last-Modified 条件刷新、随机轮换和近似 LRU 淘汰。远程 401/403、超时或 5xx 时会使用有效缓存与永久本地图降级；远程故障不会清空缓存。
+
+混合压缩包可在源码部署目录使用容器安全导入：
+
+```bash
+mkdir -p data/imports
+cp /path/to/gallery.zip data/imports/
+docker compose run --rm api python -m app.importer \
+  /app/data/imports/gallery.zip --output-dir /app/data/images --dry-run
+docker compose run --rm api python -m app.importer \
+  /app/data/imports/gallery.zip --output-dir /app/data/images
+```
+
+支持 ZIP、TAR.GZ、TGZ；按真实视觉方向分类，并拒绝路径穿越、链接、设备文件和解压炸弹。
 
 ## 数据持久化
 

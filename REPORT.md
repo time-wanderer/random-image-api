@@ -466,3 +466,78 @@ CMD port: 10086
 2. 可选增加按格式过滤的 query，例如 `?format=webp`；
 3. 对超大目录可改用 inotify 或手动 rescan，并关闭短周期全量扫描；
 4. 若未来多机部署，再评估对象存储与 PostgreSQL，而不是现在拆分微服务。
+
+## 29. WebDAV Hybrid、缓存轮换与安全归档导入（2026-08-29）
+
+### 需求与技术选择
+
+本轮在不破坏现有本地图库模式的前提下增加可选 `hybrid` 存储。用户手工添加或归档导入的 `data/images/` 仍是永久业务数据；WebDAV 只作为进阶远程图库，按 `desktop/`、`mobile/` 目录分类。应用通过 `PROPFIND` 同步轻量索引，不批量复制整个远程图库，从而保留扩展图片数量和控制 VPS 磁盘占用的实际收益。
+
+Hybrid 默认以 `HYBRID_REMOTE_PROBABILITY=0.9` 实现约 90% WebDAV 优先、10% 本地优先。本地分支为空时仍尝试远程。远程返回 401/403、超时、连接异常、5xx、非法路径或无效图片时，先从同方向的有效 WebDAV 缓存和本地永久图片联合池降级；必要时再沿用既有方向 fallback。远程故障且没有可服务文件时返回 503，远程健康但所有来源确实为空时返回 404。
+
+WebDAV 缓存独立保存在 `data/cache/webdav/`，不与永久图库混用。缓存实现容量和文件数上限、近似 LRU、刷新 TTL、ETag / Last-Modified 条件更新、每轮随机标记一定比例缓存重新验证、临时文件写入和原子替换。远程故障不会全清缓存，缓存维护永不删除 `data/images/`。
+
+新增安全归档导入 CLI，支持 ZIP、TAR.GZ 和 TGZ。导入器不依赖归档中的分类名称，而是使用 Pillow 解码、应用 EXIF Orientation、按真实视觉宽高放入 `desktop/` 或 `mobile/`，并使用内容 SHA-256 安全命名和去重。实现拒绝绝对路径、盘符路径、反斜杠、`..`、实际 NUL、符号链接、硬链接、设备或特殊文件、成员数量或体积超限、总展开量超限、异常压缩比和 Pillow 像素炸弹；正式写入前先验证整个归档，使用暂存目录和原子移动。
+
+### 创建和修改的主要文件
+
+- 新增 `app/webdav.py`：远程索引、受限下载、缓存命中、刷新、维护和安全 URL 处理；
+- 新增 `app/importer.py`：安全归档导入 CLI；
+- 新增 `tests/test_webdav.py`、`tests/test_importer.py`；
+- 修改 `app/config.py`、`app/db.py`、`app/main.py`：配置、SQLite 表、Hybrid 请求路径、管理接口和健康状态；
+- 修改 `.env.example`、`requirements.txt`、Dockerfile、Compose 和 entrypoint；
+- 修改 `scripts/backup.sh`：明确排除可重建缓存并脱敏 WebDAV 用户名和密码；
+- 更新 `README.md`、`MIGRATION.md` 和 `DOCKERHUB_OVERVIEW.md`。
+
+### 实际执行的测试
+
+实际执行：
+
+```bash
+/opt/venv/bin/python -m pytest -q
+/opt/venv/bin/python -m compileall -q app tests
+for f in docker-entrypoint.sh scripts/*.sh; do bash -n "$f"; done
+git diff --check
+```
+
+结果：57 项自动测试全部通过。唯一警告来自 FastAPI TestClient 对当前 Starlette/httpx 组合的上游弃用提示，不影响测试结果。
+
+WebDAV 测试覆盖 HTTPS、允许主机与路径校验，受限 XML 和下载，90% 概率边界，本地池为空时反向尝试远程，403 降级到缓存与本地联合池，远程唯一来源故障，远程健康但空目录，缓存 miss/hit，ETag 条件刷新，随机轮换标记，容量和文件数淘汰以及管理状态。测试使用 `httpx.MockTransport`，未使用真实 WebDAV 凭据或访问用户远程存储。
+
+归档导入测试覆盖 ZIP/TAR.GZ、路径穿越、绝对路径、盘符、反斜杠、实际 NUL、链接和特殊文件、延迟出现的恶意成员、成员/总量/压缩比/Pillow 限制、错误扩展名、横竖屏和正方形分类、内容去重、dry-run、JSON CLI 和失败退出码。
+
+另在 `/tmp` 创建完全隔离的虚拟项目，实际运行 `scripts/backup.sh`。最终验证结果：
+
+```text
+sqlite_snapshot=ok
+permanent_images=included cache=excluded secrets=sanitized result=PASS
+```
+
+归档包含本地永久图片、SQLite `VACUUM INTO` 快照、示例配置和脱敏配置；不包含 `data/cache`；`ADMIN_TOKEN`、`WEBDAV_USERNAME` 和 `WEBDAV_PASSWORD` 均被清空。该测试最初发现 `WEBDAV_USERNAME` 未脱敏，已将 `USERNAME` 加入敏感字段规则并复验通过。编辑后还检查并恢复 `scripts/backup.sh` 的 `755` 执行权限。临时目录由 trap 自动清理，未读取或修改项目现有图片、数据库、备份、`.env` 或镜像归档。
+
+### 远程 Docker 隔离验收（2026-08-30）
+
+本轮随后在独立 Debian 13 Docker 环境完成了新增功能的真实容器验收。测试使用全新隔离目录、独立 Compose project、独立镜像标签、独立容器网络和未占用的高位端口；未读取、停止、重建或删除服务器原有业务容器。
+
+实际结果：
+
+- Docker Engine 28.5.2、Docker Compose v2.40.3；
+- `docker compose config -q`：通过；
+- `docker compose build --pull api`：成功，验证镜像 ID 为 `sha256:928162db8a948045e6bb79b01c1c9b58a9c92b9138ae648183dca8bc40a93383`；
+- 在一次性容器的清洁环境中运行完整测试：57 项通过；
+- Compose healthcheck：从 `starting` 变为 `healthy`；
+- 混合 ZIP 归档 dry-run 和正式导入：3 张有效图片按真实尺寸导入，横屏 1、竖屏 1、正方形 1，非图片跳过；
+- `/health`、Desktop / Mobile `/random`、错误与正确 `ADMIN_TOKEN`、容器 restart 后持久化：通过；
+- Uvicorn 应用进程实际以 UID `1000` 运行，永久图片、SQLite 和 WebDAV 缓存目录对该用户可写；entrypoint 仅以 root 修正 bind mount 权限后降权；
+- 使用隔离的自签名 HTTPS Mock WebDAV 完成真实 `PROPFIND`：成功索引 Desktop / Mobile 共 2 个远程对象；
+- 远程 v1 图片按需下载并写入独立缓存，TTL 到期后通过 ETag 条件刷新为 v2 内容；
+- Mock WebDAV 切换为 HTTP 403 后，API 返回 HTTP 200，设置 `X-Remote-Fallback-Used: true`，并从有效 WebDAV 缓存与永久本地图联合池继续服务；
+- 403 状态下手动索引同步返回 502，但原有 2 条远程索引和缓存均保留，健康状态报告 `degraded`；
+- `/admin/cache/maintain` 成功标记缓存进行后续条件刷新，没有清空缓存或永久图库；
+- 远程隔离 Backup：SQLite `PRAGMA integrity_check=ok`，永久图片与数据库快照入档，`data/cache` 排除，`ADMIN_TOKEN`、`WEBDAV_USERNAME`、`WEBDAV_PASSWORD` 均脱敏。
+
+测试过程中先后修正了验收脚本自身的三个问题：生产镜像环境变量污染默认配置测试、Mock WebDAV 未消费 `PROPFIND` 请求体、归档成员带 `./` 前缀。这些均通过清洁测试环境或修正 Mock / 断言解决，没有掩盖产品失败。远程 Hybrid、缓存更新、403 降级和 Backup 门禁最终均明确通过。
+
+### 已知限制
+
+第一版 WebDAV 使用目录分类，因此远程图片放错 `desktop/` / `mobile/` 会在实际下载并校验时被拒绝，而不会提前通过仅索引阶段自动移动远程文件。应用只需要 WebDAV 读取权限，不会重命名或删除远程文件。WebDAV 完整图库不包含在本项目 Backup 中，必须由远程服务端单独备份。

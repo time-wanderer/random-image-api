@@ -158,8 +158,19 @@ docker load -i dist/random-image-api-v1.0.0.tar
 | `SCAN_INTERVAL_SECONDS` | 后台扫描间隔 | `300` |
 | `MAX_PICK_RETRIES` | 损坏/缺失文件重试次数 | `8` |
 | `TRUSTED_PROXY_HEADERS` | 是否信任 `X-Forwarded-For` / `X-Real-IP` | `true` |
+| `STORAGE_MODE` | 存储模式：`local` / `hybrid` | `local` |
+| `HYBRID_REMOTE_PROBABILITY` | Hybrid 优先选择 WebDAV 的概率 | `0.9` |
+| `WEBDAV_BASE_URL` | HTTPS WebDAV 根 URL | 空 |
+| `WEBDAV_DESKTOP_ROOT` | WebDAV 横图目录 | `/desktop/` |
+| `WEBDAV_MOBILE_ROOT` | WebDAV 竖图目录 | `/mobile/` |
+| `WEBDAV_ALLOWED_HOSTS` | 允许访问的 WebDAV 主机，逗号分隔 | 空 |
+| `WEBDAV_SYNC_INTERVAL_SECONDS` | 远程轻量索引同步周期 | `300` |
+| `CACHE_MAX_BYTES` | WebDAV 缓存容量上限 | `1073741824` |
+| `CACHE_MAX_FILES` | WebDAV 缓存文件数上限 | `2000` |
+| `CACHE_REFRESH_AFTER_SECONDS` | 缓存条件刷新间隔 | `3600` |
+| `CACHE_ROTATE_PERCENT` | 每轮随机轮换比例 | `10` |
 
-`.env` 不进 Git。不要把真实 Token 写进 README 或镜像。
+`.env` 不进 Git。不要把真实 Token、WebDAV 用户名或密码写进 README、镜像、数据库或日志。
 
 ## GitHub 与隐私安全
 
@@ -219,6 +230,93 @@ curl -X POST -H "X-Admin-Token: <token>" http://127.0.0.1:10086/admin/rescan
 - `height > width` → mobile / portrait
 - `width == height` → square，默认 desktop 和 mobile 都可返回
 
+## WebDAV Hybrid 与混合压缩包
+
+默认 `STORAGE_MODE=local`，现有本地图片方式不变：用户放入 `data/images/` 的图片属于永久图库，不会被缓存维护删除。进阶模式使用 WebDAV 扩展图库：
+
+```text
+<WEBDAV_BASE_URL>/desktop/   横屏图片
+<WEBDAV_BASE_URL>/mobile/    竖屏图片
+```
+
+应用通过 `PROPFIND` 只同步路径、大小、ETag 和修改时间等轻量索引，不会预先下载整个远程图库。图片被选中时才下载到独立的 `data/cache/webdav/`；下载后会用 Pillow 校验真实格式、EXIF 方向和宽高。
+
+### 启用 WebDAV
+
+在 `.env` 中配置：
+
+```env
+STORAGE_MODE=hybrid
+HYBRID_REMOTE_PROBABILITY=0.9
+WEBDAV_BASE_URL=https://dav.example.com/random-image-api
+WEBDAV_DESKTOP_ROOT=/desktop/
+WEBDAV_MOBILE_ROOT=/mobile/
+WEBDAV_ALLOWED_HOSTS=dav.example.com
+WEBDAV_USERNAME=专用只读账号
+WEBDAV_PASSWORD=应用密码
+```
+
+要求使用 HTTPS，并建议账号仅有图库目录读取权限。真实凭据只能放在未跟踪的 `.env`，不能写入仓库、日志或文档。配置变化后执行：
+
+```bash
+docker compose up -d --force-recreate
+curl -sS http://127.0.0.1:10086/health
+```
+
+### 90% 远程优先与降级
+
+- 默认每次请求有 90% 概率优先 WebDAV、10% 概率优先本地永久图库；本地为空时仍会继续尝试远程。
+- WebDAV 缓存命中时直接返回缓存；未命中或需要更新时进行受限下载。
+- WebDAV 返回 401/403、连接或读取超时、5xx、非法内容或下载失败时，立即从同方向的“有效 WebDAV 缓存 + 本地永久图片”联合池降级选择。
+- 同方向为空且 `FALLBACK_ENABLED=true` 时，再尝试另一方向联合池。
+- 远程正常但图库和本地均为空时返回 404；远程故障且没有任何可降级图片时返回 503。
+
+响应头 `X-Image-Source` 为 `local`、`webdav-live` 或 `webdav-cache`；`X-Remote-Fallback-Used: true` 表示发生了远程故障降级。
+
+### 缓存更新机制
+
+缓存不会永久固定：
+
+1. 超过 `CACHE_REFRESH_AFTER_SECONDS` 后，下次命中使用 ETag / Last-Modified 条件请求；远端未变时以 304 更新状态。
+2. 后台每轮维护随机标记 `CACHE_ROTATE_PERCENT` 的缓存，使冷门项也能在后续访问时重新验证。
+3. 超过 `CACHE_MAX_BYTES` 或 `CACHE_MAX_FILES` 时按近似 LRU 淘汰旧缓存。
+4. 下载先写临时文件，校验后原子替换，不会提供半文件。
+5. WebDAV 故障不会全清缓存；`data/images/` 永久本地图永不参与缓存淘汰。
+
+设置 `ADMIN_TOKEN` 后可手动操作：
+
+```bash
+curl -sS -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
+  http://127.0.0.1:10086/admin/webdav/sync
+
+curl -sS -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
+  http://127.0.0.1:10086/admin/cache/maintain
+```
+
+`/health` 会增加脱敏后的 `webdav` 和 `cache` 状态。
+
+### 导入目录混乱的压缩包
+
+支持 ZIP、TAR.GZ 和 TGZ。归档里的目录与文件名可以不统一；导入器按图片真实视觉宽高分类，并以内容 SHA-256 安全命名和去重。
+
+```bash
+mkdir -p data/imports
+cp /path/to/gallery.zip data/imports/
+
+# 仅预览，不写文件
+docker compose run --rm api python -m app.importer \
+  /app/data/imports/gallery.zip --output-dir /app/data/images --dry-run
+
+# 正式导入
+docker compose run --rm api python -m app.importer \
+  /app/data/imports/gallery.zip --output-dir /app/data/images
+
+# 让常驻服务立即重扫
+docker compose up -d
+```
+
+结果进入 `data/images/desktop/` 和 `data/images/mobile/`。导入器拒绝绝对路径、`..`、链接、设备文件、解压炸弹、超限成员及 Pillow 像素炸弹；重复图片跳过，不会修改 SQLite 或调用 Restore。确认成功后再自行删除原压缩包。
+
 ## API 文档
 
 ### `GET /health`
@@ -254,6 +352,8 @@ curl -X POST -H "X-Admin-Token: <token>" http://127.0.0.1:10086/admin/rescan
 - `X-Image-Orientation`: `desktop` / `mobile` / `square`
 - `X-Image-Width` / `X-Image-Height`
 - `X-Fallback-Used`: `true` / `false`
+- `X-Image-Source`: `local` / `webdav-live` / `webdav-cache`
+- `X-Remote-Fallback-Used`: WebDAV 故障时是否使用缓存/本地联合池降级
 
 常见错误：
 
@@ -263,9 +363,17 @@ curl -X POST -H "X-Admin-Token: <token>" http://127.0.0.1:10086/admin/rescan
 | 没有任何可用图片 | `404` |
 | 数据库不可用 | `503` |
 
-### `POST /admin/rescan`
+### 管理接口
 
-仅当 `ADMIN_TOKEN` 非空时启用。请求头：`X-Admin-Token`。
+仅当 `ADMIN_TOKEN` 非空时启用，均要求请求头 `X-Admin-Token`：
+
+| 接口 | 用途 |
+| --- | --- |
+| `POST /admin/rescan` | 立即重扫本地永久图库 |
+| `POST /admin/webdav/sync` | 立即同步 WebDAV 轻量索引 |
+| `POST /admin/cache/maintain` | 立即执行缓存轮换标记与容量淘汰 |
+
+`ADMIN_TOKEN` 为空时管理接口返回 404；令牌错误时返回 401。修改 `.env` 后使用 `docker compose up -d --force-recreate`，仅执行 `restart` 不会重新载入环境变量。
 
 ## Curl 示例
 
@@ -297,11 +405,12 @@ curl -i 'http://127.0.0.1:10086/random?type=test'
 
 必须持久化、必须随项目一起迁移：
 
-- `data/images/`：生产图片
-- `data/database/images.db`：SQLite 元数据；WAL 模式下还可能出现 `images.db-wal` / `images.db-shm`
+- `data/images/`：用户手工添加或压缩包导入的本地永久图片，必须备份和迁移
+- `data/database/images.db`：本地与 WebDAV 索引元数据；WAL 模式下还可能出现 `images.db-wal` / `images.db-shm`
+- `data/cache/webdav/`：按需下载的 WebDAV 可重建缓存，有容量上限，默认不备份
 - `data/logs/`：访问日志，可按需清理，不作为核心数据
 
-不要只把图片打进 Docker Image。容器删除后，只要 `./data` 还在，重建即可恢复。
+不要只把图片打进 Docker Image。容器删除后，只要 `./data` 还在，重建即可恢复。本地永久图片和 WebDAV 缓存严格分离，缓存维护绝不会删除 `data/images/`。
 
 ## Backup
 
@@ -317,12 +426,12 @@ backups/backup-YYYY-MM-DD-HHMMSS.tar.gz
 
 备份内容：
 
-- 全部图片
-- 使用 SQLite `VACUUM INTO` 得到的一致性数据库快照
+- `data/images/` 中的全部本地永久图片
+- 使用 SQLite `VACUUM INTO` 得到的一致性数据库快照（含本地与远程索引）
 - `.env.example`
-- 脱敏后的环境变量副本（`ADMIN_TOKEN` 等敏感值会被清空）
+- 脱敏后的环境变量副本（`ADMIN_TOKEN`、WebDAV 用户名和密码等敏感值会被清空）
 
-不会覆盖历史备份，也不会打包 cache、venv、日志热文件以外的无意义目录。
+不会覆盖历史备份；明确排除可从 WebDAV 重建的 `data/cache/`、venv、热日志和无意义目录。WebDAV 远程图库本体必须使用 WebDAV 服务商的快照、版本或备份功能另行保护。
 
 SQLite 不要在服务写入时直接 `cp images.db`。本脚本使用官方推荐的 `VACUUM INTO`，生成独立一致快照，不依赖复制 `-wal` / `-shm`。
 

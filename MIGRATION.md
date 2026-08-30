@@ -9,8 +9,8 @@
 | 路径 | 原因 |
 | --- | --- |
 | 整个项目源码目录 | Dockerfile、compose、脚本、应用代码 |
-| `data/images/` | 生产图片 |
-| `data/database/images.db` | SQLite 元数据 |
+| `data/images/` | 用户手工添加或压缩包导入的本地永久图片 |
+| `data/database/images.db` | 本地图片与 WebDAV 远程索引元数据 |
 | `data/database/images.db-wal` / `images.db-shm` | 若存在，表示 WAL 未完全 checkpoint；建议先停服务再拷 |
 | `.env` | 运行配置；到新机器后按端口和 Token 再检查一遍 |
 | `backups/` | 历史备份，建议一并带走 |
@@ -21,6 +21,7 @@
 | --- | --- |
 | `__pycache__/`、`.pytest_cache/`、`.venv/` | 可重建 |
 | `data/logs/` | 日志，不是业务数据 |
+| `data/cache/webdav/` | 可从 WebDAV 按需重建的有界缓存；不属于永久图库 |
 | Docker 容器、镜像、匿名卷 | 新机器重新 `docker compose build` |
 | 当前 VPS 的 `/root`、`/etc`、系统软件包 | 新机器只装 Docker |
 | 宿主机上的 Python / SQLite | 运行时在容器内 |
@@ -94,9 +95,11 @@ tar --exclude='random-image-api/.venv' \
 
 - `APP_PORT` 是否与防火墙 / 反向代理一致
 - `ADMIN_TOKEN` 是否仍需要
+- Hybrid 模式的 `WEBDAV_BASE_URL`、`WEBDAV_ALLOWED_HOSTS` 和远程目录是否仍正确
+- `WEBDAV_USERNAME`、`WEBDAV_PASSWORD` 是否已通过安全渠道重新配置
 - 不要把旧机器绝对路径写进去
 
-备份包里的 `config/env.sanitized` 会清空 Token，不能替代你自己保管的 `.env`。
+备份包里的 `config/env.sanitized` 会清空管理令牌、WebDAV 用户名和密码，不能替代你自己安全保管的 `.env`。不要把真实凭据上传到 GitHub 或放进迁移归档的公开副本。
 
 ## 新 VPS 操作
 
@@ -144,7 +147,7 @@ Compose 会覆盖容器内数据路径为 `/app/data`，并挂载当前目录的
 RESTORE_CONFIRM=YES ./scripts/restore.sh backups/backup-YYYY-MM-DD-HHMMSS.tar.gz
 ```
 
-如果已经完整复制了整个 `data/` 目录，可以跳过 restore，直接启动。
+如果已经完整复制了整个 `data/` 目录，可以跳过 restore，直接启动。`data/cache/webdav/` 无需复制；它会在远程图片被访问后按需重建。
 
 Restore 会：
 
@@ -161,7 +164,14 @@ docker compose ps
 docker compose logs --tail=100
 ```
 
-健康状态应为 `healthy`（取决于 Docker healthcheck 启动宽限期）。
+健康状态应为 `healthy`（取决于 Docker healthcheck 启动宽限期）。Hybrid 模式会在启动时同步一次 WebDAV 索引；设置了 `ADMIN_TOKEN` 时也可以手动触发：
+
+```bash
+curl -sS -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
+  http://127.0.0.1:${APP_PORT:-10086}/admin/webdav/sync
+```
+
+随后查看 `/health` 中脱敏后的 `webdav` 与 `cache` 状态。旧缓存无需迁移，访问远程图片后会按需重建。
 
 ### 6. 验证
 

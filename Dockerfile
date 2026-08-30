@@ -8,7 +8,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DATA_DIR=/app/data \
     IMAGES_DIR=/app/data/images \
     DATABASE_PATH=/app/data/database/images.db \
-    LOG_DIR=/app/data/logs
+    LOG_DIR=/app/data/logs \
+    CACHE_DIR=/app/data/cache/webdav
 
 WORKDIR /app
 
@@ -16,7 +17,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends gosu \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1000 --shell /usr/sbin/nologin appuser \
-    && mkdir -p /app/data/images/desktop /app/data/images/mobile /app/data/database /app/data/logs \
+    && mkdir -p /app/data/images/desktop /app/data/images/mobile /app/data/database /app/data/logs /app/data/cache/webdav/tmp \
     && chown -R appuser:appuser /app
 
 COPY requirements.txt /app/requirements.txt

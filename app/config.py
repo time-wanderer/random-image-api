@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -39,6 +39,25 @@ class Settings(BaseSettings):
     max_pick_retries: int = 8
     trusted_proxy_headers: bool = True
 
+    storage_mode: str = "local"
+    hybrid_remote_probability: float = 0.9
+    webdav_base_url: str = ""
+    webdav_desktop_root: str = "/desktop/"
+    webdav_mobile_root: str = "/mobile/"
+    webdav_allowed_hosts: str = ""
+    webdav_username: str = ""
+    webdav_password: str = ""
+    webdav_timeout_seconds: float = 10.0
+    webdav_sync_interval_seconds: int = 300
+    webdav_max_xml_bytes: int = 2 * 1024 * 1024
+    webdav_max_objects: int = 10_000
+    webdav_max_download_bytes: int = 25 * 1024 * 1024
+    cache_dir: Path | None = None
+    cache_max_bytes: int = 1024 * 1024 * 1024
+    cache_max_files: int = 2_000
+    cache_refresh_after_seconds: int = 3600
+    cache_rotate_percent: int = 10
+
     @field_validator("square_policy")
     @classmethod
     def validate_square_policy(cls, value: str) -> str:
@@ -52,6 +71,62 @@ class Settings(BaseSettings):
     def validate_log_level(cls, value: str) -> str:
         return value.strip().upper()
 
+    @field_validator("storage_mode")
+    @classmethod
+    def validate_storage_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"local", "hybrid"}:
+            raise ValueError("STORAGE_MODE must be one of: local, hybrid")
+        return normalized
+
+    @field_validator("hybrid_remote_probability")
+    @classmethod
+    def validate_remote_probability(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("HYBRID_REMOTE_PROBABILITY must be between 0 and 1")
+        return value
+
+    @field_validator(
+        "scan_interval_seconds",
+        "max_pick_retries",
+        "webdav_timeout_seconds",
+        "webdav_sync_interval_seconds",
+        "webdav_max_xml_bytes",
+        "webdav_max_objects",
+        "webdav_max_download_bytes",
+        "cache_max_bytes",
+        "cache_max_files",
+        "cache_refresh_after_seconds",
+    )
+    @classmethod
+    def validate_positive_limits(cls, value: int | float) -> int | float:
+        if value <= 0:
+            raise ValueError(
+                "timeout, interval, size, count, and cache limits must be positive"
+            )
+        return value
+
+    @field_validator("cache_rotate_percent")
+    @classmethod
+    def validate_cache_rotate_percent(cls, value: int) -> int:
+        if not 0 <= value <= 100:
+            raise ValueError("CACHE_ROTATE_PERCENT must be between 0 and 100")
+        return value
+
+    @model_validator(mode="after")
+    def set_cache_dir(self) -> "Settings":
+        if self.cache_dir is None:
+            self.cache_dir = self.data_dir / "cache" / "webdav"
+        return self
+
+    @property
+    def webdav_hosts(self) -> set[str]:
+        return {
+            item.strip().lower()
+            for item in self.webdav_allowed_hosts.split(",")
+            if item.strip()
+        }
+
     def ensure_directories(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.images_dir.mkdir(parents=True, exist_ok=True)
@@ -59,6 +134,9 @@ class Settings(BaseSettings):
         (self.images_dir / "mobile").mkdir(parents=True, exist_ok=True)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        assert self.cache_dir is not None
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        (self.cache_dir / "tmp").mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache

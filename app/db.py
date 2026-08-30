@@ -21,6 +21,36 @@ CREATE TABLE IF NOT EXISTS images (
 );
 
 CREATE INDEX IF NOT EXISTS idx_images_orientation ON images(orientation);
+
+CREATE TABLE IF NOT EXISTS webdav_objects (
+    href TEXT PRIMARY KEY,
+    orientation TEXT NOT NULL,
+    etag TEXT,
+    last_modified TEXT,
+    content_length INTEGER,
+    content_type TEXT,
+    updated_at TEXT NOT NULL,
+    selected_mark INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_webdav_objects_orientation
+    ON webdav_objects(orientation);
+
+CREATE TABLE IF NOT EXISTS webdav_cache (
+    href TEXT PRIMARY KEY,
+    cache_name TEXT NOT NULL UNIQUE,
+    orientation TEXT NOT NULL,
+    width INTEGER NOT NULL,
+    height INTEGER NOT NULL,
+    content_type TEXT NOT NULL,
+    file_size INTEGER NOT NULL,
+    etag TEXT,
+    last_modified TEXT,
+    fetched_at REAL NOT NULL,
+    accessed_at REAL NOT NULL,
+    maintenance_mark INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_webdav_cache_lru
+    ON webdav_cache(accessed_at);
 """
 
 

@@ -58,3 +58,5 @@ dist/
 *.tar.gz
 *.tgz
 *.zip
+
+data/cache/

@@ -14,6 +14,7 @@ services:
       IMAGES_DIR: /app/data/images
       DATABASE_PATH: /app/data/database/images.db
       LOG_DIR: /app/data/logs
+      CACHE_DIR: /app/data/cache/webdav
     ports:
       - "${APP_PORT:-10086}:10086"
     volumes:
