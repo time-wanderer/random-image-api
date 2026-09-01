@@ -32,6 +32,22 @@ class Settings(BaseSettings):
     log_dir: Path = Path("./data/logs")
     log_level: str = "INFO"
     admin_token: str = ""
+    admin_session_secret: str = ""
+    admin_path: str = "/manage-images"
+    admin_cookie_name: str = "ria_admin_session"
+    admin_session_ttl_seconds: int = 1800
+    admin_preview_ttl_seconds: int = 600
+    admin_login_window_seconds: int = 60
+    admin_login_max_attempts: int = 5
+    admin_max_upload_bytes: int = 25 * 1024 * 1024
+    admin_page_size: int = 20
+    admin_max_archive_bytes: int = 512 * 1024 * 1024
+    admin_max_archive_members: int = 10_000
+    admin_max_archive_member_bytes: int = 100 * 1024 * 1024
+    admin_max_archive_total_bytes: int = 1024 * 1024 * 1024
+    admin_max_archive_compression_ratio: float = 200.0
+    admin_max_image_pixels: int = 100_000_000
+    upload_tmp_dir: Path | None = None
     fallback_enabled: bool = True
     square_policy: str = "both"
     scan_on_startup: bool = True
@@ -57,6 +73,24 @@ class Settings(BaseSettings):
     cache_max_files: int = 2_000
     cache_refresh_after_seconds: int = 3600
     cache_rotate_percent: int = 10
+
+    @field_validator("admin_path")
+    @classmethod
+    def validate_admin_path(cls, value: str) -> str:
+        path = "/" + value.strip().strip("/")
+        if path == "/" or "//" in path or any(part in {".", ".."} for part in path.split("/")):
+            raise ValueError("ADMIN_PATH must be a normalized non-root path")
+        reserved = ("/random", "/health", "/admin", "/docs", "/redoc", "/openapi.json")
+        if any(path == item or path.startswith(item + "/") for item in reserved):
+            raise ValueError("ADMIN_PATH conflicts with an API route")
+        return path
+
+    @field_validator("admin_cookie_name")
+    @classmethod
+    def validate_cookie_name(cls, value: str) -> str:
+        if not value or not value.replace("_", "").replace("-", "").isalnum():
+            raise ValueError("ADMIN_COOKIE_NAME is invalid")
+        return value
 
     @field_validator("square_policy")
     @classmethod
@@ -97,6 +131,18 @@ class Settings(BaseSettings):
         "cache_max_bytes",
         "cache_max_files",
         "cache_refresh_after_seconds",
+        "admin_session_ttl_seconds",
+        "admin_preview_ttl_seconds",
+        "admin_login_window_seconds",
+        "admin_login_max_attempts",
+        "admin_max_upload_bytes",
+        "admin_page_size",
+        "admin_max_archive_bytes",
+        "admin_max_archive_members",
+        "admin_max_archive_member_bytes",
+        "admin_max_archive_total_bytes",
+        "admin_max_archive_compression_ratio",
+        "admin_max_image_pixels",
     )
     @classmethod
     def validate_positive_limits(cls, value: int | float) -> int | float:
@@ -117,6 +163,8 @@ class Settings(BaseSettings):
     def set_cache_dir(self) -> "Settings":
         if self.cache_dir is None:
             self.cache_dir = self.data_dir / "cache" / "webdav"
+        if self.upload_tmp_dir is None:
+            self.upload_tmp_dir = self.data_dir / "tmp" / "admin"
         return self
 
     @property
@@ -137,6 +185,8 @@ class Settings(BaseSettings):
         assert self.cache_dir is not None
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         (self.cache_dir / "tmp").mkdir(parents=True, exist_ok=True)
+        assert self.upload_tmp_dir is not None
+        self.upload_tmp_dir.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache

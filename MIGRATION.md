@@ -1,226 +1,190 @@
-# VPS 迁移手册
+# Random Image API V2 迁移手册
 
-目标：半年以后换一台全新 Linux VPS，只安装 Docker Engine 和 Docker Compose Plugin，复制项目与数据、配置 `.env`，即可用 `docker compose up -d` 恢复服务。
+本文覆盖两类迁移：V1→V2 原地升级，以及把 V2 连同永久数据迁移到新 VPS。V2 是 V1 的向后兼容扩展，保留 `/random`、本地/Hybrid/WebDAV 90% 策略、缓存、importer 和 Backup / Restore。
 
-本项目不依赖当前机器的 IP、域名、用户名或绝对路径。
+> Docker Hub 的 `qinlingmonkey/random-image-api:v1` 继续保留。V2 镜像仅计划发布，尚未发布；当前 V2 应从源码通过 Docker Compose 构建。
 
-## 必须迁移
+## 1. 数据边界
 
-| 路径 | 原因 |
-| --- | --- |
-| 整个项目源码目录 | Dockerfile、compose、脚本、应用代码 |
-| `data/images/` | 用户手工添加或压缩包导入的本地永久图片 |
-| `data/database/images.db` | 本地图片与 WebDAV 远程索引元数据 |
-| `data/database/images.db-wal` / `images.db-shm` | 若存在，表示 WAL 未完全 checkpoint；建议先停服务再拷 |
-| `.env` | 运行配置；到新机器后按端口和 Token 再检查一遍 |
-| `backups/` | 历史备份，建议一并带走 |
+必须保留：
 
-## 不需要迁移
+- `data/images/`：本地永久图库；
+- `data/database/images.db`：图片元数据、tags、多对多关系、WebDAV 索引；
+- 私下保存的部署配置和真实 Secret。
 
-| 路径 | 原因 |
-| --- | --- |
-| `__pycache__/`、`.pytest_cache/`、`.venv/` | 可重建 |
-| `data/logs/` | 日志，不是业务数据 |
-| `data/cache/webdav/` | 可从 WebDAV 按需重建的有界缓存；不属于永久图库 |
-| Docker 容器、镜像、匿名卷 | 新机器重新 `docker compose build` |
-| 当前 VPS 的 `/root`、`/etc`、系统软件包 | 新机器只装 Docker |
-| 宿主机上的 Python / SQLite | 运行时在容器内 |
+可重建、通常不迁移：
 
-本项目未使用 PostgreSQL。没有 `pg_dump` 步骤。
+- `data/cache/webdav/`；
+- `data/logs/`；
+- Python 缓存、测试缓存、构建归档。
 
-## 旧 VPS 操作
+官方备份脚本包含图库、SQLite 一致性副本和脱敏配置，不包含缓存与真实 Secret。
 
-### 1. 检查服务
+## 2. V1→V2 原地升级
+
+### 2.1 升级前检查
 
 ```bash
-cd /path/to/random-image-api
 docker compose ps
-docker compose logs --tail=100
-curl -sS http://127.0.0.1:${APP_PORT:-10086}/health
+curl -fsS http://127.0.0.1:10086/health
+./scripts/backup.sh
 ```
 
-确认 `status` 为 `ok`，记下图片数量。
+把输出的备份文件复制到机器外部。另行安全保存真实配置；不要把 Secret 写进 Git 或迁移文档。
 
-### 2. 停止写入
+### 2.2 停止并替换源码
 
 ```bash
 docker compose down
+# 在当前项目目录切换/复制经过审核的 V2 源码
+cp .env.example .env.example.v2-reference
 ```
 
-不要使用 `docker compose down -v`。
-
-停服务后再备份，WAL 会更干净。`backup.sh` 即使在运行中也会用 `VACUUM INTO` 做一致快照，但迁移前停写更稳妥。
-
-### 3. 做 Backup
+不要用新模板覆盖现有私密配置。对照 V2 配置补充管理 UI 变量，至少生成独立的管理令牌和会话密钥：
 
 ```bash
-./scripts/backup.sh
-ls -lh backups/backup-*.tar.gz
+openssl rand -hex 32
+openssl rand -hex 32
 ```
 
-得到：
+分别写入 `ADMIN_TOKEN` 与 `ADMIN_SESSION_SECRET`。仅使用生成命令，不在文档、聊天或日志里粘贴真实值。
 
-```text
-backups/backup-YYYY-MM-DD-HHMMSS.tar.gz
-```
-
-其中包含：
-
-- 图片
-- `VACUUM INTO` 生成的 SQLite 快照（不需要再单独复制 `-wal`/`-shm`）
-- 脱敏配置
-
-### 4. 打包项目（可选但推荐）
+### 2.3 重建并触发原地迁移
 
 ```bash
-cd ..
-tar --exclude='random-image-api/.venv' \
-    --exclude='random-image-api/.pytest_cache' \
-    --exclude='random-image-api/data/logs/*' \
-    --exclude='random-image-api/.a0proj' \
-    -czf random-image-api-migrate.tar.gz random-image-api
-```
-
-也可以只复制：
-
-- 源码与脚本
-- `data/images`
-- `data/database`
-- `.env`
-- `backups/backup-*.tar.gz`
-
-### 5. `.env` 处理
-
-把旧 `.env` 带到新机器。到新环境后检查：
-
-- `APP_PORT` 是否与防火墙 / 反向代理一致
-- `ADMIN_TOKEN` 是否仍需要
-- Hybrid 模式的 `WEBDAV_BASE_URL`、`WEBDAV_ALLOWED_HOSTS` 和远程目录是否仍正确
-- `WEBDAV_USERNAME`、`WEBDAV_PASSWORD` 是否已通过安全渠道重新配置
-- 不要把旧机器绝对路径写进去
-
-备份包里的 `config/env.sanitized` 会清空管理令牌、WebDAV 用户名和密码，不能替代你自己安全保管的 `.env`。不要把真实凭据上传到 GitHub 或放进迁移归档的公开副本。
-
-## 新 VPS 操作
-
-### 1. 安装 Docker
-
-按官方文档安装 Docker Engine 和 Docker Compose Plugin，例如 Debian / Ubuntu：
-
-- https://docs.docker.com/engine/install/debian/
-- https://docs.docker.com/engine/install/ubuntu/
-
-验证：
-
-```bash
-docker version
-docker compose version
-```
-
-不需要安装 Python、pip、SQLite、PostgreSQL。
-
-### 2. 复制项目
-
-把 `random-image-api` 目录或迁移包放到任意路径，例如：
-
-```text
-/opt/random-image-api
-```
-
-路径可以变，不要写死到应用代码里。
-
-### 3. 配置 `.env`
-
-```bash
-cd /opt/random-image-api
-cp .env.example .env
-# 或使用从旧机器带来的 .env
-```
-
-Compose 会覆盖容器内数据路径为 `/app/data`，并挂载当前目录的 `./data`。因此换目录部署时，只要相对结构不变即可。
-
-### 4. Restore
-
-如果新机器上还没有图片/数据库，用备份恢复：
-
-```bash
-RESTORE_CONFIRM=YES ./scripts/restore.sh backups/backup-YYYY-MM-DD-HHMMSS.tar.gz
-```
-
-如果已经完整复制了整个 `data/` 目录，可以跳过 restore，直接启动。`data/cache/webdav/` 无需复制；它会在远程图片被访问后按需重建。
-
-Restore 会：
-
-1. 校验归档结构
-2. 把现有 `data/images`、`data/database` 复制到 `backups/pre-restore-<时间>/`
-3. 写入图片和 SQLite 快照
-4. 删除恢复后的 `-wal` / `-shm`，避免旧 WAL 与新快照混用
-
-### 5. 启动
-
-```bash
-docker compose up -d --build
+docker compose build --pull
+docker compose up -d
 docker compose ps
-docker compose logs --tail=100
+docker compose logs --tail=100 api
+curl -fsS http://127.0.0.1:10086/health
 ```
 
-健康状态应为 `healthy`（取决于 Docker healthcheck 启动宽限期）。Hybrid 模式会在启动时同步一次 WebDAV 索引；设置了 `ADMIN_TOKEN` 时也可以手动触发：
+V2 首次连接旧 SQLite 时会幂等执行：
+
+- 新建 `tags`、`image_tags`、`webdav_object_tags`；
+- 为本地图片和 WebDAV 对象补充 V2 字段及索引；
+- 保留旧图片和远端索引；
+- 把 schema `user_version` 更新为 2。
+
+旧图片默认仍是未打标签状态：`GET /random` 行为不变；只有关联标签后才会进入 `/random/{slug}` 或 `?tag=` 的主题结果。重复启动不会重复破坏数据。
+
+### 2.4 验证兼容接口与 V2
 
 ```bash
-curl -sS -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
-  http://127.0.0.1:${APP_PORT:-10086}/admin/webdav/sync
+curl -D - -o /dev/null http://127.0.0.1:10086/random
+curl -D - -o /dev/null 'http://127.0.0.1:10086/random?type=mobile'
+curl -i http://127.0.0.1:10086/random/not-created
 ```
 
-随后查看 `/health` 中脱敏后的 `webdav` 与 `cache` 状态。旧缓存无需迁移，访问远程图片后会按需重建。
-
-### 6. 验证
+最后一个请求预期为 `404`。登录管理 UI，创建标签并给图片关联后，再验证：
 
 ```bash
-curl -sS http://127.0.0.1:${APP_PORT:-10086}/health
-curl -D - -o /tmp/mig.bin http://127.0.0.1:${APP_PORT:-10086}/random
-file /tmp/mig.bin
+curl -D - -o /dev/null http://127.0.0.1:10086/random/<slug>
+curl -D - -o /dev/null 'http://127.0.0.1:10086/random?tag=<slug>'
 ```
 
-判断成功的标准：
+Hybrid 用户还应同步 WebDAV，并核对第一层主题目录映射、缓存与故障降级。
 
-- `docker compose ps` 中服务为 running
-- `/health` 返回 `status=ok`、`database=ok`
-- 图片数量与旧环境一致或符合预期
-- `/random` 返回 `200` 且 `Content-Type` 为图片
-- `data/images` 下文件仍在
+### 2.5 回滚到 V1
 
-## SQLite 迁移说明
+不要让 V1 长期直接写入已升级的 V2 数据库。安全回滚方式：
 
-推荐方式 A：先 `docker compose down`，再复制整个 `data/database/`。
+```bash
+docker compose down
+RESTORE_CONFIRM=YES ./scripts/restore.sh /path/to/升级前备份.tar.gz
+# 切回 V1 源码或继续使用已保留的 :v1 镜像
+docker compose up -d
+```
 
-推荐方式 B：使用 `./scripts/backup.sh` 的 `VACUUM INTO` 快照，再在新机器 `restore.sh`。
+恢复会先把当前图库和数据库保存到 `backups/pre-restore-*`。
 
-不要在数据库正在写入时只复制 `images.db` 而丢掉不一致的 WAL。若服务还在跑，至少把 `images.db`、`images.db-wal`、`images.db-shm` 一起拷，并在新机器启动前确保三者来自同一次拷贝；更稳妥的做法仍是停服务或使用 `VACUUM INTO`。
+## 3. 迁移到新 VPS
 
-恢复后若只放入快照文件，应删除旧的 `-wal`/`-shm`。`restore.sh` 已处理这一点。
+### 3.1 旧 VPS：冻结写入并备份
 
-## PostgreSQL
+在维护窗口停止管理 UI 上传、删除、标签编辑和归档确认，然后：
 
-当前版本不使用 PostgreSQL，无 `pg_dump` / `pg_restore` 步骤。如果未来升级为 PostgreSQL，必须同时改：
+```bash
+docker compose ps
+./scripts/backup.sh
+docker compose down
+sha256sum backups/backup-*.tar.gz
+```
 
-- `docker-compose.yml` 增加数据库服务和 volume
-- healthcheck / `depends_on: condition: service_healthy`
-- backup / restore 改为 `docker compose exec` + `pg_dump` / `pg_restore`
-- 本文件补上数据库密码仅存在 `.env` 的说明
+把以下内容通过受保护通道复制到新 VPS：
 
-## 如何回滚
+1. V2 项目源码（不含缓存、日志和构建产物）；
+2. 最新 `backup-*.tar.gz` 及校验和；
+3. 单独保存的真实部署配置。
 
-1. `docker compose down`
-2. 把 `backups/pre-restore-<时间>/data/images` 和 `database` 拷回 `data/`
-3. 或对更早的 `backup-*.tar.gz` 再执行一次 restore
-4. `docker compose up -d`
-5. 再测 `/health` 和 `/random`
+### 3.2 新 VPS：准备项目
 
-## 最小记忆清单
+安装 Docker Engine 与 Docker Compose Plugin，然后：
 
-1. 旧机器：`docker compose down` → `./scripts/backup.sh`
-2. 带走：源码 + `data/` + `.env` + `backups/`
-3. 新机器：安装 Docker Compose Plugin
-4. 配 `.env` → `RESTORE_CONFIRM=YES ./scripts/restore.sh <归档>`（若未整目录复制 data）
-5. `docker compose up -d --build`
-6. 验证 `/health` 和 `/random`
+```bash
+cd /path/to/random-image-api
+cp .env.example .env
+chmod 600 .env
+```
+
+把真实配置安全写回 `.env`。检查端口、数据路径、管理会话密钥，以及 Hybrid 的 URL、允许主机、用户名和密码。不要依赖旧 VPS 的固定 IP、用户名或绝对路径。
+
+### 3.3 恢复永久数据
+
+```bash
+sha256sum -c /path/to/backup.sha256
+RESTORE_CONFIRM=YES ./scripts/restore.sh /path/to/backup.tar.gz
+```
+
+脚本恢复 `data/images/` 和 `data/database/`，清理 SQLite WAL/SHM 残留，并保留恢复前数据副本。WebDAV 缓存不恢复，服务会按需重建。
+
+### 3.4 构建、启动和验收
+
+```bash
+docker compose build
+docker compose up -d
+docker compose ps
+docker compose logs --tail=100 api
+curl -fsS http://127.0.0.1:10086/health
+curl -D - -o /dev/null http://127.0.0.1:10086/random
+```
+
+主题验收：
+
+- 已启用标签返回 `200`，响应头有 `X-Image-Tag`；
+- 未知、禁用、非法或无候选标签返回 `404`；
+- 数据库不可用，或远端失败且无法安全降级时返回 `503`；
+- 同一图片可同时从多个标签接口返回；
+- V1 `/random` 与 `?type=` 继续工作。
+
+管理验收：登录、标签增删改/合并、多图上传、删除确认、WebDAV 对象启停、缓存维护、归档 preview-confirm。归档 preview 绑定会话且有 TTL，迁移或重启前必须确认完成或重新预览。
+
+## 4. WebDAV 迁移注意事项
+
+远端推荐布局：
+
+```text
+desktop/<tag-slug>/image.webp
+mobile/<tag-slug>/image.webp
+```
+
+只有方向根目录下的第一层目录作为主题提示。新 VPS 必须能通过 HTTPS 访问配置的 WebDAV 主机，且主机在 `WEBDAV_ALLOWED_HOSTS` 中。迁移后执行：
+
+```bash
+curl -fsS -X POST -H 'X-Admin-Token: <ADMIN_TOKEN>' \
+  http://127.0.0.1:10086/admin/webdav/sync
+```
+
+随后按主题请求图片，确认远端索引、缓存和 90% 远程优先策略符合预期。
+
+## 5. 最小迁移清单
+
+- [ ] 升级/迁移前健康检查正常。
+- [ ] 已生成备份并复制到机器外。
+- [ ] 已安全保存真实配置，未提交 Secret。
+- [ ] V2 从源码经 Docker Compose 构建；未误用不存在的 `:v2` 镜像。
+- [ ] Restore 完成，图库和 SQLite 均存在。
+- [ ] `/health`、V1 随机接口、主题接口已验证。
+- [ ] 管理 UI 安全与写操作已抽查。
+- [ ] Hybrid 用户已验证第一层主题、同步、缓存和降级。
+- [ ] 回滚备份在验收结束前保留。

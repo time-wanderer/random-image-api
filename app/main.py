@@ -5,6 +5,7 @@ import random
 import secrets
 import threading
 import time
+from urllib.parse import quote
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -13,7 +14,8 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 
-from app import __version__
+from app import __version__, db
+from app.admin import create_admin_router
 from app.catalog import Catalog, NoImageAvailable
 from app.config import Settings, get_settings
 from app.ua import detect_client_type, describe_user_agent
@@ -132,6 +134,7 @@ def create_app(
     application.state.settings = settings
     application.state.webdav_transport = webdav_transport
     application.state.rng = rng or random
+    application.include_router(create_admin_router(settings))
 
     @application.middleware("http")
     async def access_log(request: Request, call_next):
@@ -180,11 +183,32 @@ def create_app(
         }
 
     @application.get("/random")
+    @application.get("/random/{tag_slug}")
     def random_image(
         request: Request,
+        tag_slug: str | None = None,
         type: str | None = Query(default=None, alias="type"),
+        tag: str | None = Query(default=None, alias="tag"),
     ):
         catalog: Catalog = request.app.state.catalog
+        if tag_slug is not None and tag is not None and tag_slug.strip().lower() != tag.strip().lower():
+            raise HTTPException(400, "path tag and query tag must match")
+        requested_tag = tag_slug if tag_slug is not None else tag
+        if requested_tag is not None:
+            try:
+                requested_tag = db.validate_slug(requested_tag)
+            except ValueError as exc:
+                raise HTTPException(404, "tag not found or disabled") from exc
+            with db.get_conn(settings.database_path) as conn:
+                tag_row = conn.execute(
+                    "SELECT display_name FROM tags WHERE slug=? COLLATE NOCASE AND enabled=1",
+                    (requested_tag,),
+                ).fetchone()
+            if tag_row is None:
+                raise HTTPException(404, "tag not found or disabled")
+            tag_display_name = str(tag_row["display_name"])
+        else:
+            tag_display_name = None
         if type is not None:
             normalized = type.strip().lower()
             if normalized not in VALID_TYPES:
@@ -206,7 +230,7 @@ def create_app(
 
         def local_only(orientation: str):
             try:
-                item, _ = catalog.pick(orientation, allow_fallback=False)
+                item, _ = catalog.pick(orientation, allow_fallback=False, tag=requested_tag)
                 return item
             except NoImageAvailable:
                 return None
@@ -214,7 +238,7 @@ def create_app(
         def union_pick(orientation: str):
             candidates: list[tuple[object, str]] = [
                 (item, "webdav-cache")
-                for item in webdav.cached_candidates(orientation)
+                for item in webdav.cached_candidates(orientation, requested_tag)
             ]
             local = local_only(orientation)
             if local is not None:
@@ -223,7 +247,7 @@ def create_app(
 
         if remote_attempted:
             try:
-                record = webdav.fetch(preferred)
+                record = webdav.fetch(preferred, requested_tag)
                 source = record.source
             except WebDAVError as exc:
                 remote_fallback_used = True
@@ -242,12 +266,12 @@ def create_app(
                 record, source = selected
         else:
             try:
-                record, fallback_used = catalog.pick(preferred)
+                record, fallback_used = catalog.pick(preferred, tag=requested_tag)
             except NoImageAvailable as local_error:
                 if not webdav.enabled:
                     raise HTTPException(404, str(local_error)) from local_error
                 try:
-                    record = webdav.fetch(preferred)
+                    record = webdav.fetch(preferred, requested_tag)
                     source = record.source
                 except WebDAVError as remote_error:
                     remote_fallback_used = True
@@ -275,7 +299,10 @@ def create_app(
             "X-Fallback-Used": "true" if fallback_used else "false",
             "X-Image-Source": source,
             "X-Remote-Fallback-Used": "true" if remote_fallback_used else "false",
+            "X-Image-Tag": requested_tag or "untagged",
         }
+        if tag_display_name is not None:
+            headers["X-Image-Tag-Name"] = quote(tag_display_name, safe="")
         return FileResponse(
             path=record.abs_path,
             media_type=record.content_type,

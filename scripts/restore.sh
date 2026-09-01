@@ -29,7 +29,26 @@ STAGING_DIR="${ROOT_DIR}/backups/.restore-${TIMESTAMP}"
 SAFETY_DIR="${ROOT_DIR}/backups/pre-restore-${TIMESTAMP}"
 
 mkdir -p "${STAGING_DIR}" "${SAFETY_DIR}"
-tar -xzf "${ARCHIVE}" -C "${STAGING_DIR}"
+# Validate every member before extraction. Backups may contain only regular
+# files/directories with relative POSIX paths; links and special files are rejected.
+python3 - "${ARCHIVE}" <<'PY_RESTORE_CHECK'
+from pathlib import PurePosixPath
+import sys
+import tarfile
+
+with tarfile.open(sys.argv[1], "r:gz") as archive:
+    members = archive.getmembers()
+    if len(members) > 100_000:
+        raise SystemExit("Backup archive has too many members")
+    for member in members:
+        name = member.name
+        path = PurePosixPath(name)
+        if not name or "\0" in name or name.startswith("/") or path.is_absolute() or ".." in path.parts:
+            raise SystemExit(f"Unsafe backup member path: {name!r}")
+        if not (member.isfile() or member.isdir()):
+            raise SystemExit(f"Links and special backup members are forbidden: {name!r}")
+PY_RESTORE_CHECK
+tar -xzf "${ARCHIVE}" --no-same-owner --no-same-permissions -C "${STAGING_DIR}"
 
 if [[ ! -d "${STAGING_DIR}/data/images" && ! -f "${STAGING_DIR}/data/database/images.db" ]]; then
   echo "Archive does not look like a valid backup." >&2

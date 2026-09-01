@@ -1,567 +1,259 @@
-# Random Image API
+# Random Image API V2
 
-可长期运行的随机图片服务。根据客户端 `User-Agent` 自动判断 Desktop / Mobile，优先返回横屏或竖屏图片，也支持 `type=desktop` / `type=mobile` 显式指定。
+Random Image API V2 是 V1 的**向后兼容扩展**：保留 V1 的 `GET /random`、`?type=`、本地图库、WebDAV Hybrid、默认 90% 远程优先、缓存、归档 importer、Backup / Restore，并新增主题标签和安全管理 UI。
 
-项目按单机、可迁移、可备份恢复的目标设计：FastAPI + SQLite + 本地永久图库 + 可选 WebDAV 扩展图库 + Docker Compose。
+> 发布状态：Docker Hub 的 `qinlingmonkey/random-image-api:v1` 继续保留；V2 镜像仅在计划中，**尚未发布**。当前 V2 请从源码使用 Docker Compose 构建，不要尝试拉取 `:v2`。
 
-## 快速导航
+V1 快照见 [docs/V1.md](docs/V1.md)，V1 原地升级和 VPS 迁移见 [MIGRATION.md](MIGRATION.md)。
 
-| 目标 | 建议阅读 |
-| --- | --- |
-| 直接使用已发布镜像 | [Docker Hub 镜像快速部署](#docker-hub-镜像快速部署) |
-| 从 GitHub 源码构建 | [从源码部署](#从源码部署) |
-| 手工添加本地图片 | [图片添加方式](#图片添加方式) |
-| 使用 WebDAV 扩展图库 | [WebDAV Hybrid 与混合压缩包](#webdav-hybrid-与混合压缩包) |
-| 导入目录混乱的压缩包 | [导入目录混乱的压缩包](#导入目录混乱的压缩包) |
-| 备份或恢复 | [Backup](#backup) / [Restore](#restore) |
-| 迁移到新 VPS | [MIGRATION.md](MIGRATION.md) |
+## 1. V2 新增能力
 
-## 功能列表
+- `tags` 主题模型：一张本地图片或一个 WebDAV 对象可关联多个标签，多对多关系不会复制图片文件。
+- `GET /random/{slug}` 与 `GET /random?tag={slug}`：按主题随机返回图片。
+- 严格主题语义：未知、禁用或非法标签返回 `404`；标签存在但没有可用图片也返回 `404`；数据库不可用或无法安全降级的远端故障返回 `503`。
+- WebDAV 第一层主题：在 `desktop/`、`mobile/` 下的第一层子目录名可作为标签提示，例如 `desktop/anime/a.jpg` 对应 `anime`。
+- 浏览器管理 UI：标签管理、多图上传、删除、WebDAV 对象启停与标签维护、缓存清理、归档 preview-confirm。
+- SQLite V1→V2 幂等原地迁移：启动时创建标签关系表并补充新字段，原有未打标签图片仍可由 `GET /random` 使用。
 
-- `GET /random`：返回一张随机图片
-- 根据 User-Agent 识别 Windows / macOS / Desktop Linux / Android / iPhone 等客户端
-- Desktop 优先横屏，Mobile 优先竖屏
-- 显式参数 `?type=desktop` / `?type=mobile` 优先于 User-Agent
-- 支持 `.jpg` / `.jpeg` / `.png` / `.webp`
-- 按图片宽高自动分类，正方形图片默认两边都可用
-- Desktop 或 Mobile 缺失时自动 fallback 到另一侧
-- `GET /health`：服务、数据库、图片数量
-- 访问日志：时间、路径、客户端类型、状态码、返回图片、耗时、代理感知 IP
-- SQLite 元数据缓存，避免每次请求全盘扫描
-- Docker Compose 部署、bind mount 持久化、Backup / Restore
-- 默认本地模式；可选 WebDAV Hybrid，默认 90% 优先远程并支持故障降级
-- WebDAV 只同步轻量索引，远程图片按需缓存、条件刷新、随机轮换和 LRU 淘汰
-- 安全导入 ZIP / TAR.GZ / TGZ 混合图片包，按真实方向分类并去重
-
-## 技术架构
+## 2. 架构与数据
 
 ```text
 Client
-  -> Docker Compose (api)
-    -> Uvicorn + FastAPI
-      -> 本地永久图库 (data/images/)
-      -> SQLite 本地与远程索引 (data/database/images.db)
-      -> 可选 WebDAV desktop/ + mobile/
-      -> 有界远程缓存 (data/cache/webdav/)
+  -> Docker Compose / FastAPI
+    -> data/images/                 本地永久图库
+    -> data/database/images.db      SQLite 元数据、标签关系、远端索引
+    -> 可选 WebDAV                  远端扩展图库
+    -> data/cache/webdav/           可重建的按需缓存
+    -> 管理 UI                      会话、CSRF、上传与归档操作
 ```
 
-- Web：Python 3.12、FastAPI、Uvicorn
-- 图片尺寸：Pillow `Image.size`
-- 元数据：SQLite WAL
-- 部署：单服务 Docker Compose
-- 持久化：`./data` bind mount，不把生产图片打进镜像
+支持 `.jpg`、`.jpeg`、`.png`、`.webp`。Desktop 优先横图，Mobile 优先竖图；`SQUARE_POLICY` 控制正方形归属，`FALLBACK_ENABLED` 控制方向回退。
 
-不引入 Redis、Celery、PostgreSQL、Kubernetes 或多实例共享存储。当前业务是单机随机读图，SQLite 足够。
+标签 slug 只允许 1–63 位小写字母、数字和单连字符，不能使用保留路由名。显示名称与 slug 分离。`images ↔ tags`、`webdav_objects ↔ tags` 都是多对多关系。
 
-## 项目目录
+## 3. 从源码部署 V2
 
-```text
-random-image-api/
-├── app/
-│   ├── main.py            # FastAPI 入口
-│   ├── catalog.py         # 扫描、分类、随机选择、fallback
-│   ├── db.py              # SQLite
-│   ├── webdav.py          # WebDAV 索引、下载、缓存与降级
-│   ├── importer.py        # ZIP / TAR.GZ 安全导入
-│   ├── ua.py              # User-Agent 识别
-│   └── config.py          # 环境变量配置
-├── tests/
-├── data/
-│   ├── images/
-│   │   ├── desktop/
-│   │   └── mobile/
-│   ├── database/
-│   ├── cache/webdav/
-│   └── logs/
-├── backups/
-├── scripts/
-│   ├── backup.sh
-│   ├── restore.sh
-│   └── generate_samples.py
-├── Dockerfile
-├── docker-compose.yml
-├── .env.example
-├── .gitignore
-├── requirements.txt
-├── README.md
-├── MIGRATION.md
-└── REPORT.md
-```
-
-## 环境要求
-
-正式部署只需要：
-
-- Linux VPS
-- Docker Engine
-- Docker Compose Plugin
-
-开发 / 本地验证还可以使用 Python 3.12+。
-
-不要在宿主机单独安装业务数据库。不要依赖当前机器的绝对路径、固定 IP 或固定域名。
-
-## Docker Hub 镜像快速部署
-
-适合只想运行服务、不需要修改源码的用户。镜像为 `linux/amd64`：
+要求：Linux、Docker Engine、Docker Compose Plugin。
 
 ```bash
-mkdir -p random-image-api/data/images/desktop \
-  random-image-api/data/images/mobile \
-  random-image-api/data/database \
-  random-image-api/data/cache/webdav \
-  random-image-api/data/logs
-cd random-image-api
-# 镜像以 UID/GID 1000 非 Root 运行，数据目录必须可写
-sudo chown -R 1000:1000 data
-```
-
-创建 `compose.yml`：
-
-```yaml
-services:
-  api:
-    image: qinlingmonkey/random-image-api:v1
-    restart: unless-stopped
-    ports:
-      - "10086:10086"
-    env_file:
-      - .env
-    volumes:
-      - ./data:/app/data
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:10086/health', timeout=4)"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
-```
-
-创建最小 `.env`，并生成不可预测的管理令牌：
-
-```bash
-printf 'ADMIN_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
+cp .env.example .env
+# 生成管理令牌与管理会话密钥，分别写入 .env 对应字段
+openssl rand -hex 32
+openssl rand -hex 32
 chmod 600 .env
-docker compose pull
+
+docker compose build
 docker compose up -d
 docker compose ps
 curl -fsS http://127.0.0.1:10086/health
 ```
 
-然后把图片复制到 `data/images/desktop/` 或 `data/images/mobile/`。程序最终仍以图片真实宽高分类；目录名称主要方便人工管理。等待自动扫描，或读取 `.env` 后调用管理接口：
+请把第二个生成值写入 `ADMIN_SESSION_SECRET`。`.env.example` 已提供该变量名；不要把真实值提交到 Git。Compose 将 `./data` 挂载到 `/app/data`，所有重要数据保留在宿主机。
+
+常用操作：
 
 ```bash
-set -a; . ./.env; set +a
-curl -fsS -X POST -H "X-Admin-Token: ${ADMIN_TOKEN}" \
+docker compose logs -f api
+docker compose restart api
+docker compose up -d --build
+docker compose down
+```
+
+## 4. API 教程
+
+### 4.1 健康检查
+
+```bash
+curl -fsS http://127.0.0.1:10086/health
+```
+
+`GET /health` 返回版本、数据库、本地图片数量、最后扫描状态、WebDAV 和缓存摘要。
+
+### 4.2 V1 兼容随机接口
+
+```bash
+curl -D headers.txt -o image.bin http://127.0.0.1:10086/random
+curl -D headers.txt -o image.bin 'http://127.0.0.1:10086/random?type=mobile'
+```
+
+未传 `type` 时按 User-Agent 识别；显式 `desktop` / `mobile` 优先。响应头包含方向、尺寸、来源、方向回退、远端降级和标签等信息。
+
+### 4.3 V2 主题接口
+
+以下两种写法等价：
+
+```bash
+curl -D headers.txt -o image.bin http://127.0.0.1:10086/random/anime
+curl -D headers.txt -o image.bin 'http://127.0.0.1:10086/random?tag=anime&type=desktop'
+```
+
+若路径和查询同时给出标签，两者必须一致，否则返回 `400`。成功响应包含：
+
+- `X-Image-Tag`：标签 slug；无标签筛选时为 `untagged`。
+- `X-Image-Tag-Name`：主题显示名称（主题请求时）。
+- `X-Image-Source`：`local`、`webdav-cache` 等来源。
+- `X-Fallback-Used`、`X-Remote-Fallback-Used`：方向或远端降级状态。
+
+严格状态码：
+
+| 状态 | 含义 |
+| --- | --- |
+| `200` | 找到并返回图片 |
+| `400` | `type` 非法，或路径标签与查询标签冲突 |
+| `404` | 标签未知/禁用/非法，或该筛选下确认没有可用图片 |
+| `503` | 数据库不可用，或 WebDAV 故障且没有本地/缓存候选可安全降级 |
+
+## 5. 本地图片与 importer
+
+可把图片放入：
+
+```text
+data/images/desktop/
+data/images/mobile/
+```
+
+程序仍以真实宽高分类，目录主要用于人工整理。等待周期扫描，或配置 `ADMIN_TOKEN` 后触发：
+
+```bash
+curl -fsS -X POST \
+  -H 'X-Admin-Token: <ADMIN_TOKEN>' \
   http://127.0.0.1:10086/admin/rescan
-unset ADMIN_TOKEN
-curl -D - -o random-image.bin http://127.0.0.1:10086/random
 ```
 
-完整的镜像部署、WebDAV 和故障排查教程见 [DOCKERHUB_OVERVIEW.md](DOCKERHUB_OVERVIEW.md)。
-
-## 从源码部署
-
-适合需要修改代码、运行测试或自行构建镜像的用户：
+命令行 importer 继续支持 ZIP、TAR.GZ、TGZ：
 
 ```bash
-cp .env.example .env
-# 按需修改 APP_PORT、LOG_LEVEL、ADMIN_TOKEN
-python3 scripts/generate_samples.py   # 可选：生成演示图片
-docker compose build
-docker compose up -d
-docker compose ps
-docker compose logs -f
+python -m app.importer /path/to/images.zip --images-dir ./data/images --dry-run
+python -m app.importer /path/to/images.zip --images-dir ./data/images
 ```
 
-浏览器或 curl 访问：
+它会先验证归档成员、路径、大小和压缩比，再识别真实图片格式、方向并按内容去重。V2 管理 UI 提供更安全易用的 preview-confirm 流程，见下文。
 
-```text
-http://<主机>:<APP_PORT>/health
-http://<主机>:<APP_PORT>/random
-```
+## 6. WebDAV Hybrid
 
-`docker-compose.yml` 会把容器内路径固定为 `/app/data`，并把宿主机 `./data` 挂进去。因此 `.env` 里即使写 `./data`，容器内仍使用 `/app/data`。
+在私密配置中设置：
 
-## 构建完整 Docker 镜像文件
-
-GitHub 仓库保存用于维护和重新构建的**源码底本**。Docker 镜像归档体积较大，不建议提交到 Git。在安装了 Docker Engine 的机器上执行：
-
-```bash
-./scripts/build-image.sh
-```
-
-默认生成：
-
-```text
-dist/random-image-api-local.tar
-dist/random-image-api-local.tar.sha256
-```
-
-也可以指定镜像名称、标签和输出路径：
-
-```bash
-IMAGE_NAME=random-image-api \
-IMAGE_TAG=v1.0.0 \
-OUTPUT="$PWD/dist/random-image-api-v1.0.0.tar" \
-./scripts/build-image.sh
-```
-
-在另一台服务器加载：
-
-```bash
-sha256sum -c dist/random-image-api-v1.0.0.tar.sha256
-docker load -i dist/random-image-api-v1.0.0.tar
-```
-
-镜像只包含应用代码和 Python 依赖，**不包含** `.env`、真实图片、SQLite 数据库、日志或备份。生产数据仍通过 `./data:/app/data` 持久化。
-
-## .env 配置
-
-参考 `.env.example`：
-
-| 变量 | 含义 | 默认 |
-| --- | --- | --- |
-| `IMAGE_NAME` | Docker 镜像名称 | `random-image-api` |
-| `IMAGE_TAG` | Docker 镜像标签 | `local` |
-| `APP_PORT` | 宿主机映射端口 | `10086` |
-| `APP_HOST` | 监听地址 | `0.0.0.0` |
-| `APP_BIND_PORT` | 容器内端口，保持 `10086` | `10086` |
-| `DATA_DIR` | 数据根目录 | `./data` |
-| `IMAGES_DIR` | 图片目录 | `./data/images` |
-| `DATABASE_PATH` | SQLite 文件 | `./data/database/images.db` |
-| `LOG_DIR` | 日志目录 | `./data/logs` |
-| `LOG_LEVEL` | 日志级别 | `INFO` |
-| `ADMIN_TOKEN` | 可选管理令牌，空则关闭 `/admin/rescan` | 空 |
-| `FALLBACK_ENABLED` | 一侧无图时是否回退到另一侧 | `true` |
-| `SQUARE_POLICY` | 正方形图片归属：`both` / `desktop` / `mobile` | `both` |
-| `SCAN_ON_STARTUP` | 启动时扫描图片 | `true` |
-| `SCAN_INTERVAL_SECONDS` | 后台扫描间隔 | `300` |
-| `MAX_PICK_RETRIES` | 损坏/缺失文件重试次数 | `8` |
-| `TRUSTED_PROXY_HEADERS` | 是否信任 `X-Forwarded-For` / `X-Real-IP` | `true` |
-| `STORAGE_MODE` | 存储模式：`local` / `hybrid` | `local` |
-| `HYBRID_REMOTE_PROBABILITY` | Hybrid 优先选择 WebDAV 的概率 | `0.9` |
-| `WEBDAV_BASE_URL` | HTTPS WebDAV 根 URL | 空 |
-| `WEBDAV_DESKTOP_ROOT` | WebDAV 横图目录 | `/desktop/` |
-| `WEBDAV_MOBILE_ROOT` | WebDAV 竖图目录 | `/mobile/` |
-| `WEBDAV_ALLOWED_HOSTS` | 允许访问的 WebDAV 主机，逗号分隔 | 空 |
-| `WEBDAV_SYNC_INTERVAL_SECONDS` | 远程轻量索引同步周期 | `300` |
-| `CACHE_MAX_BYTES` | WebDAV 缓存容量上限 | `1073741824` |
-| `CACHE_MAX_FILES` | WebDAV 缓存文件数上限 | `2000` |
-| `CACHE_REFRESH_AFTER_SECONDS` | 缓存条件刷新间隔 | `3600` |
-| `CACHE_ROTATE_PERCENT` | 每轮随机轮换比例 | `10` |
-
-`.env` 不进 Git。不要把真实 Token、WebDAV 用户名或密码写进 README、镜像、数据库或日志。
-
-## GitHub 与隐私安全
-
-公开或私有 GitHub 仓库均只提交源码、Dockerfile、Compose 配置、脚本和文档。以下内容已由 `.gitignore` 排除，不应使用 `git add -f` 强制添加：
-
-- `.env`、`.a0proj/` 和编辑器配置；
-- `data/images/` 中的真实图片；
-- SQLite 数据库、WAL / SHM 文件；
-- 访问日志与 Backup；
-- `dist/` 下的 Docker 镜像 tar 和校验文件。
-
-首次推送前执行：
-
-```bash
-git status
-git ls-files
-git grep -nI -E 'password|secret|api[_-]?key|BEGIN .*PRIVATE' -- . ':!.git'
-```
-
-建议在 GitHub 设置中启用邮箱隐私，并使用 GitHub 提供的 `users.noreply.github.com` 邮箱作为 Git 提交邮箱。不要在仓库、Issue 或日志中发布 VPS IP、SSH 用户名、密码、Token、私人照片或完整访问日志。
-
-## 第一次启动
-
-1. 复制项目到目标机器。
-2. `cp .env.example .env` 并检查端口。
-3. 把图片放到 `data/images/`，可按 desktop/mobile 分子目录，也可以平铺，程序会按宽高分类。
-4. `docker compose up -d --build`
-5. 访问 `/health`，确认 `status=ok` 且图片数量正确。
-
-## 停止、重启、状态、日志、更新
-
-```bash
-docker compose down          # 停止，不删除 ./data
-docker compose restart
-docker compose ps
-docker compose logs
-docker compose logs -f
-docker compose up -d --build           # 更新代码后重建
-docker compose up -d --force-recreate  # 配置变化后重建容器
-```
-
-不要把 `docker compose down -v` 当作日常命令。本项目用 bind mount，数据主要在 `./data`，但 `-v` 仍可能误删其他匿名卷。
-
-## 图片添加方式
-
-1. 把 `.jpg` / `.jpeg` / `.png` / `.webp` 放到 `data/images/`。
-2. 可选分子目录 `desktop/`、`mobile/`，仅方便人工管理，最终分类以宽高为准。
-3. 等待最多 `SCAN_INTERVAL_SECONDS`，或在设置了 `ADMIN_TOKEN` 后调用：
-
-```bash
-curl -X POST -H "X-Admin-Token: <token>" http://127.0.0.1:10086/admin/rescan
-```
-
-分类规则：
-
-- `width > height` → desktop / landscape
-- `height > width` → mobile / portrait
-- `width == height` → square，默认 desktop 和 mobile 都可返回
-
-## WebDAV Hybrid 与混合压缩包
-
-默认 `STORAGE_MODE=local`，现有本地图片方式不变：用户放入 `data/images/` 的图片属于永久图库，不会被缓存维护删除。进阶模式使用 WebDAV 扩展图库：
-
-```text
-<WEBDAV_BASE_URL>/desktop/   横屏图片
-<WEBDAV_BASE_URL>/mobile/    竖屏图片
-```
-
-应用通过 `PROPFIND` 只同步路径、大小、ETag 和修改时间等轻量索引，不会预先下载整个远程图库。图片被选中时才下载到独立的 `data/cache/webdav/`；下载后会用 Pillow 校验真实格式、EXIF 方向和宽高。
-
-### 启用 WebDAV
-
-在 `.env` 中配置：
-
-```env
+```dotenv
 STORAGE_MODE=hybrid
 HYBRID_REMOTE_PROBABILITY=0.9
-WEBDAV_BASE_URL=https://dav.example.com/random-image-api
+WEBDAV_BASE_URL=<HTTPS WebDAV 根地址>
+WEBDAV_ALLOWED_HOSTS=<允许的主机名>
+WEBDAV_USERNAME=<用户名>
+WEBDAV_PASSWORD=<密码>
 WEBDAV_DESKTOP_ROOT=/desktop/
 WEBDAV_MOBILE_ROOT=/mobile/
-WEBDAV_ALLOWED_HOSTS=dav.example.com
-WEBDAV_USERNAME=专用只读账号
-WEBDAV_PASSWORD=应用密码
 ```
 
-要求使用 HTTPS，并建议账号仅有图库目录读取权限。真实凭据只能放在未跟踪的 `.env`，不能写入仓库、日志或文档。配置变化后执行：
+建议远端结构：
 
-```bash
-docker compose up -d --force-recreate
-curl -sS http://127.0.0.1:10086/health
+```text
+desktop/
+├── anime/
+│   └── wide.webp
+└── landscape/
+    └── lake.jpg
+mobile/
+└── anime/
+    └── tall.png
 ```
 
-### 90% 远程优先与降级
+V2 读取 `desktop/`、`mobile/` 下**第一层子目录**作为主题提示；更深层目录不会产生额外层级标签。远端同步只更新轻量索引，图片在命中时按需下载。
 
-- 默认每次请求有 90% 概率优先 WebDAV、10% 概率优先本地永久图库；本地为空时仍会继续尝试远程。
-- WebDAV 缓存命中时直接返回缓存；未命中或需要更新时进行受限下载。
-- WebDAV 返回 401/403、连接或读取超时、5xx、非法内容或下载失败时，立即从同方向的“有效 WebDAV 缓存 + 本地永久图片”联合池降级选择。
-- 同方向为空且 `FALLBACK_ENABLED=true` 时，再尝试另一方向联合池。
-- 远程正常但图库和本地均为空时返回 404；远程故障且没有任何可降级图片时返回 503。
+`HYBRID_REMOTE_PROBABILITY=0.9` 保留 V1 的 90% 远程优先策略。远端失败时按当前方向尝试缓存和本地图库，必要时再做方向回退；没有候选且远端状态不可靠时返回 `503`。
 
-响应头 `X-Image-Source` 为 `local`、`webdav-live` 或 `webdav-cache`；`X-Remote-Fallback-Used: true` 表示发生了远程故障降级。
-
-### 缓存更新机制
-
-缓存不会永久固定：
-
-1. 超过 `CACHE_REFRESH_AFTER_SECONDS` 后，下次命中使用 ETag / Last-Modified 条件请求；远端未变时以 304 更新状态。
-2. 后台每轮维护随机标记 `CACHE_ROTATE_PERCENT` 的缓存，使冷门项也能在后续访问时重新验证。
-3. 超过 `CACHE_MAX_BYTES` 或 `CACHE_MAX_FILES` 时按近似 LRU 淘汰旧缓存。
-4. 下载先写临时文件，校验后原子替换，不会提供半文件。
-5. WebDAV 故障不会全清缓存；`data/images/` 永久本地图永不参与缓存淘汰。
-
-设置 `ADMIN_TOKEN` 后可手动操作：
+缓存支持 ETag / Last-Modified 条件刷新、容量与文件数上限、LRU 淘汰和随机轮换。维护接口仍兼容：
 
 ```bash
-curl -sS -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
+curl -fsS -X POST -H 'X-Admin-Token: <ADMIN_TOKEN>' \
   http://127.0.0.1:10086/admin/webdav/sync
-
-curl -sS -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
+curl -fsS -X POST -H 'X-Admin-Token: <ADMIN_TOKEN>' \
   http://127.0.0.1:10086/admin/cache/maintain
 ```
 
-`/health` 会增加脱敏后的 `webdav` 和 `cache` 状态。
+## 7. 管理 UI
 
-### 导入目录混乱的压缩包
+默认入口为 `http://<主机>:<端口>/manage-images`，可用 `ADMIN_PATH` 改为其他非保留路径。
 
-支持 ZIP、TAR.GZ 和 TGZ。归档里的目录与文件名可以不统一；导入器按图片真实视觉宽高分类，并以内容 SHA-256 安全命名和去重。
+### 必要配置
 
-```bash
-mkdir -p data/imports
-cp /path/to/gallery.zip data/imports/
-
-# 仅预览，不写文件
-docker compose run --rm api python -m app.importer \
-  /app/data/imports/gallery.zip --output-dir /app/data/images --dry-run
-
-# 正式导入
-docker compose run --rm api python -m app.importer \
-  /app/data/imports/gallery.zip --output-dir /app/data/images
-
-# 让常驻服务立即重扫
-docker compose up -d
+```dotenv
+ADMIN_TOKEN=<使用 openssl rand -hex 32 生成>
+ADMIN_SESSION_SECRET=<使用 openssl rand -hex 32 生成>
+ADMIN_PATH=/manage-images
+ADMIN_COOKIE_NAME=ria_admin_session
+ADMIN_SESSION_TTL_SECONDS=1800
+ADMIN_PREVIEW_TTL_SECONDS=600
+ADMIN_LOGIN_WINDOW_SECONDS=60
+ADMIN_LOGIN_MAX_ATTEMPTS=5
+ADMIN_MAX_UPLOAD_BYTES=26214400
+ADMIN_PAGE_SIZE=20
 ```
 
-结果进入 `data/images/desktop/` 和 `data/images/mobile/`。导入器拒绝绝对路径、`..`、链接、设备文件、解压炸弹、超限成员及 Pillow 像素炸弹；重复图片跳过，不会修改 SQLite 或调用 Restore。确认成功后再自行删除原压缩包。
+归档限制还可通过 `ADMIN_MAX_ARCHIVE_BYTES`、`ADMIN_MAX_ARCHIVE_MEMBERS`、`ADMIN_MAX_ARCHIVE_MEMBER_BYTES`、`ADMIN_MAX_ARCHIVE_TOTAL_BYTES`、`ADMIN_MAX_ARCHIVE_COMPRESSION_RATIO` 调整；图片像素上限使用 `ADMIN_MAX_IMAGE_PIXELS`，临时目录使用 `UPLOAD_TMP_DIR`，归档默认标签可用 `ADMIN_IMPORT_DEFAULT_TAG` 设置。
 
-## API 文档
+### 安全边界
 
-### `GET /health`
+- 未配置 `ADMIN_TOKEN` 时，旧管理 API 隐藏为 `404`；管理 UI 登录也依赖管理凭据。
+- 登录有限速；会话 Cookie 为 HttpOnly、SameSite=Strict，并由会话密钥签名。
+- 所有写操作要求 CSRF token；页面输出进行 HTML 转义。
+- 会话和待确认归档 preview 保存在单进程内存中；重启会退出登录并使 preview 失效。
+- 生产环境应在 HTTPS 反向代理后使用，不要公开 Token、Cookie 或 WebDAV 凭据。
 
-```json
-{
-  "status": "ok",
-  "service": "random-image-api",
-  "version": "1.0.0",
-  "images": {
-    "total": 5,
-    "desktop": 2,
-    "mobile": 2,
-    "square": 1
-  },
-  "database": "ok",
-  "fallback_enabled": true,
-  "square_policy": "both",
-  "last_scan_at": "2026-08-16T10:49:59+00:00",
-  "last_scan_error": null
-}
-```
+### 常用操作
 
-数据库异常时 `status` 为 `degraded`，`database` 为 `error`。
+1. **标签**：创建、编辑、启用/禁用、合并；一张图可添加多个标签。
+2. **上传**：多文件上传，验证格式、像素和大小，按内容哈希去重，并按真实方向保存。
+3. **删除**：本地原图删除必须输入大写 `DELETE`；操作会删除文件和对应数据库记录。
+4. **WebDAV**：启用/禁用远端对象、维护标签；同步不会复活管理员已禁用的对象。
+5. **缓存**：可运行维护或清空 WebDAV 缓存；缓存可重建，不是永久图库。
+6. **归档**：先上传到 preview，系统执行完整安全校验和 dry-run；核对摘要、默认标签及第一层目录映射后再 confirm。preview 绑定当前会话、有 TTL，登出、过期或服务重启后不能确认。
 
-### `GET /random`
+## 8. 环境变量
 
-成功时直接返回图片二进制：
-
-- `Content-Type`: `image/jpeg` / `image/png` / `image/webp`
-- `X-Client-Type`: 本次使用的目标类型
-- `X-Image-File`: 相对 `IMAGES_DIR` 的路径
-- `X-Image-Orientation`: `desktop` / `mobile` / `square`
-- `X-Image-Width` / `X-Image-Height`
-- `X-Fallback-Used`: `true` / `false`
-- `X-Image-Source`: `local` / `webdav-live` / `webdav-cache`
-- `X-Remote-Fallback-Used`: WebDAV 故障时是否使用缓存/本地联合池降级
-
-常见错误：
-
-| 情况 | HTTP |
+| 分组 | 变量 |
 | --- | --- |
-| `type=test` 等非法参数 | `400` |
-| 没有任何可用图片 | `404` |
-| 数据库不可用 | `503` |
+| 服务 | `APP_HOST`、`APP_BIND_PORT`、`APP_PORT`、`LOG_LEVEL` |
+| 数据 | `DATA_DIR`、`IMAGES_DIR`、`DATABASE_PATH`、`LOG_DIR` |
+| 选图 | `FALLBACK_ENABLED`、`SQUARE_POLICY`、`SCAN_ON_STARTUP`、`SCAN_INTERVAL_SECONDS`、`MAX_PICK_RETRIES` |
+| 管理 | `ADMIN_TOKEN`、`ADMIN_SESSION_SECRET`、`ADMIN_PATH`、`ADMIN_COOKIE_NAME`、各 `ADMIN_*` 限制、`UPLOAD_TMP_DIR` |
+| WebDAV | `STORAGE_MODE`、`HYBRID_REMOTE_PROBABILITY`、`WEBDAV_BASE_URL`、根目录、允许主机、凭据、同步/下载限制 |
+| 缓存 | `CACHE_DIR`、`CACHE_MAX_BYTES`、`CACHE_MAX_FILES`、`CACHE_REFRESH_AFTER_SECONDS`、`CACHE_ROTATE_PERCENT` |
+| 代理 | `TRUSTED_PROXY_HEADERS` |
 
-### 管理接口
+`.env` 不得提交。不要在源码、文档、命令历史或日志中保存真实密钥。若服务不在可信反向代理后，应评估关闭 `TRUSTED_PROXY_HEADERS`。
 
-仅当 `ADMIN_TOKEN` 非空时启用，均要求请求头 `X-Admin-Token`：
+## 9. V1→V2 原地升级
 
-| 接口 | 用途 |
-| --- | --- |
-| `POST /admin/rescan` | 立即重扫本地永久图库 |
-| `POST /admin/webdav/sync` | 立即同步 WebDAV 轻量索引 |
-| `POST /admin/cache/maintain` | 立即执行缓存轮换标记与容量淘汰 |
-
-`ADMIN_TOKEN` 为空时管理接口返回 404；令牌错误时返回 401。修改 `.env` 后使用 `docker compose up -d --force-recreate`，仅执行 `restart` 不会重新载入环境变量。
-
-## Curl 示例
-
-```bash
-curl -i http://127.0.0.1:10086/health
-
-curl -D - -o /tmp/random.bin http://127.0.0.1:10086/random
-
-curl -D - -o /tmp/win.jpg \
-  -H 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36' \
-  http://127.0.0.1:10086/random
-
-curl -D - -o /tmp/android.webp \
-  -H 'User-Agent: Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Mobile Safari/537.36' \
-  http://127.0.0.1:10086/random
-
-curl -D - -o /tmp/iphone.bin \
-  -H 'User-Agent: Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1' \
-  http://127.0.0.1:10086/random
-
-curl -D - -o /tmp/force-desktop.jpg \
-  -H 'User-Agent: Mozilla/5.0 (Linux; Android 10; K) Mobile Safari/537.36' \
-  'http://127.0.0.1:10086/random?type=desktop'
-
-curl -i 'http://127.0.0.1:10086/random?type=test'
-```
-
-## 数据目录
-
-必须持久化、必须随项目一起迁移：
-
-- `data/images/`：用户手工添加或压缩包导入的本地永久图片，必须备份和迁移
-- `data/database/images.db`：本地与 WebDAV 索引元数据；WAL 模式下还可能出现 `images.db-wal` / `images.db-shm`
-- `data/cache/webdav/`：按需下载的 WebDAV 可重建缓存，有容量上限，默认不备份
-- `data/logs/`：访问日志，可按需清理，不作为核心数据
-
-不要只把图片打进 Docker Image。容器删除后，只要 `./data` 还在，重建即可恢复。本地永久图片和 WebDAV 缓存严格分离，缓存维护绝不会删除 `data/images/`。
-
-## Backup
+先备份，再替换为 V2 源码并重建：
 
 ```bash
 ./scripts/backup.sh
-```
-
-生成：
-
-```text
-backups/backup-YYYY-MM-DD-HHMMSS.tar.gz
-```
-
-备份内容：
-
-- `data/images/` 中的全部本地永久图片
-- 使用 SQLite `VACUUM INTO` 得到的一致性数据库快照（含本地与远程索引）
-- `.env.example`
-- 脱敏后的环境变量副本（`ADMIN_TOKEN`、WebDAV 用户名和密码等敏感值会被清空）
-
-不会覆盖历史备份；明确排除可从 WebDAV 重建的 `data/cache/`、venv、热日志和无意义目录。WebDAV 远程图库本体必须使用 WebDAV 服务商的快照、版本或备份功能另行保护。
-
-SQLite 不要在服务写入时直接 `cp images.db`。本脚本使用官方推荐的 `VACUUM INTO`，生成独立一致快照，不依赖复制 `-wal` / `-shm`。
-
-## Restore
-
-```bash
-# 先预览，不会改数据
-./scripts/restore.sh backups/backup-YYYY-MM-DD-HHMMSS.tar.gz
-
-# 确认后执行
-RESTORE_CONFIRM=YES ./scripts/restore.sh backups/backup-YYYY-MM-DD-HHMMSS.tar.gz
-
+docker compose down
+docker compose build --pull
 docker compose up -d
 docker compose ps
-curl -i http://127.0.0.1:10086/health
-curl -D - -o /tmp/restored.bin http://127.0.0.1:10086/random
+curl -fsS http://127.0.0.1:10086/health
 ```
 
-恢复前会把现有 `data/images` 和 `data/database` 复制到 `backups/pre-restore-<时间>/`。
+V2 首次连接 SQLite 时自动、幂等地迁移 schema，并设置数据库版本。原图片、WebDAV 索引与未打标签行为继续保留；未打标签图片仍由 `/random` 使用，但不会自动出现在主题接口中。升级细节和回滚见 [MIGRATION.md](MIGRATION.md)。
 
-## 日常维护
-
-- 加图：复制到 `data/images/`，等待扫描或调用 `/admin/rescan`
-- 看状态：`docker compose ps` + `curl /health`
-- 看日志：`docker compose logs -f` 或 `data/logs/access.log`
-- 定期 `./scripts/backup.sh`，把 `backups/*.tar.gz` 拷到另一台机器或对象存储
-- 更新：`git pull` 后 `docker compose up -d --build`
-
-## 常见问题
-
-**`/random` 返回 404**
-图片目录为空，或文件都损坏 / 格式不受支持。先看 `/health` 的 `images.total`。
-
-**Android 访问却拿到横图**
-检查是否带了 `?type=desktop`。显式 type 一定优先。
-
-**改完图片数量不变**
-等扫描间隔，或配置 `ADMIN_TOKEN` 后手动 rescan。
-
-**容器重建后图片没了**
-确认启动时使用项目目录里的 `docker compose`，并且 `./data` 没有被删。不要用一次性 `docker run` 且不挂卷。
-
-**如何迁移到新 VPS**
-见 [MIGRATION.md](MIGRATION.md)。
-
-## 本地开发
+## 10. Backup / Restore
 
 ```bash
-python3 -m pip install -r requirements-dev.txt
-python3 scripts/generate_samples.py
-python3 -m pytest tests -q
-python3 -m uvicorn app.main:app --host 127.0.0.1 --port 10086
+./scripts/backup.sh
+# 先停服务；首次不确认只显示风险并退出
+RESTORE_CONFIRM=YES ./scripts/restore.sh /path/to/backup-YYYY-MM-DD-HHMMSS.tar.gz
+docker compose up -d
 ```
+
+备份包含永久图库、SQLite 一致性副本和脱敏配置，不包含 WebDAV 缓存及真实 Secret。恢复前会把现有图库和数据库复制到时间戳安全目录。跨 VPS 迁移流程见 [MIGRATION.md](MIGRATION.md)。
+
+## 11. 开发验证
+
+```bash
+python -m pytest
+python -m compileall -q app tests
+bash -n scripts/*.sh docker-entrypoint.sh
+```
+
+当前 V2 实施与验证记录见 [REPORT.md](REPORT.md)。

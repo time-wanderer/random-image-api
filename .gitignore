@@ -60,3 +60,5 @@ dist/
 *.zip
 
 data/cache/
+
+data/tmp/

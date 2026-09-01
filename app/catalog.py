@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import random
 import threading
@@ -7,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from app.config import CONTENT_TYPES, SUPPORTED_EXTENSIONS, Settings
 from app import db
@@ -29,6 +30,8 @@ class ImageRecord:
     format: str
     content_type: str
     file_size: int
+    content_hash: str | None = None
+    tags: tuple[str, ...] = ()
 
     @property
     def filename(self) -> str:
@@ -51,7 +54,8 @@ def read_image_meta(path: Path) -> tuple[int, int, str]:
     with Image.open(path) as image:
         image.verify()
     with Image.open(path) as image:
-        width, height = image.size
+        visual = ImageOps.exif_transpose(image)
+        width, height = visual.size
         fmt = (image.format or path.suffix.lstrip(".")).lower()
     return width, height, fmt
 
@@ -81,7 +85,6 @@ class Catalog:
             }
             for path in self._iter_image_files(images_dir):
                 rel_path = path.relative_to(images_dir).as_posix()
-                seen.add(rel_path)
                 try:
                     stat = path.stat()
                 except OSError as exc:
@@ -95,6 +98,7 @@ class Catalog:
                     and int(prev["mtime_ns"]) == stat.st_mtime_ns
                     and int(prev["file_size"]) == stat.st_size
                 ):
+                    seen.add(rel_path)
                     continue
 
                 try:
@@ -107,6 +111,14 @@ class Catalog:
                     continue
 
                 suffix = path.suffix.lower()
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                duplicate = conn.execute("SELECT rel_path FROM images WHERE content_hash=? AND rel_path<>?", (digest, rel_path)).fetchone()
+                if duplicate is not None:
+                    logger.warning("skip duplicate content %s (already %s)", rel_path, duplicate["rel_path"])
+                    if prev is not None:
+                        db.delete_by_rel_path(conn, rel_path)
+                    skipped += 1
+                    continue
                 record = {
                     "rel_path": rel_path,
                     "width": width,
@@ -116,14 +128,19 @@ class Catalog:
                     "content_type": CONTENT_TYPES.get(suffix, "application/octet-stream"),
                     "file_size": stat.st_size,
                     "mtime_ns": stat.st_mtime_ns,
+                    "content_hash": digest,
                 }
                 db.upsert_image(conn, record)
+                seen.add(rel_path)
                 scanned += 1
 
             removed = db.delete_missing(conn, seen)
-            rows = db.list_images(conn)
+            rows = db.list_images(conn, enabled_only=True)
+            tag_map = {int(row["image_id"]): [] for row in conn.execute("SELECT image_id FROM image_tags")}
+            for tag_row in conn.execute("SELECT it.image_id,t.slug FROM image_tags it JOIN tags t ON t.id=it.tag_id WHERE t.enabled=1"):
+                tag_map.setdefault(int(tag_row["image_id"]), []).append(str(tag_row["slug"]))
 
-        self._rebuild_cache(images_dir, rows)
+        self._rebuild_cache(images_dir, rows, tag_map)
         self.last_scan_error = None
         self.last_scan_at = db.utc_now()
         logger.info(
@@ -152,7 +169,7 @@ class Catalog:
                 continue
             yield path
 
-    def _rebuild_cache(self, images_dir: Path, rows) -> None:
+    def _rebuild_cache(self, images_dir: Path, rows, tag_map: dict[int, list[str]] | None = None) -> None:
         by_id: dict[int, ImageRecord] = {}
         desktop_ids: list[int] = []
         mobile_ids: list[int] = []
@@ -172,6 +189,8 @@ class Catalog:
                 format=row["format"],
                 content_type=row["content_type"],
                 file_size=int(row["file_size"]),
+                content_hash=row["content_hash"],
+                tags=tuple((tag_map or {}).get(int(row["id"]), [])),
             )
             by_id[record.id] = record
             if record.orientation == "desktop":
@@ -207,6 +226,7 @@ class Catalog:
         self,
         preferred: ClientType,
         allow_fallback: bool | None = None,
+        tag: str | None = None,
     ) -> tuple[ImageRecord, bool]:
         if allow_fallback is None:
             allow_fallback = self.settings.fallback_enabled
@@ -214,6 +234,9 @@ class Catalog:
         with self._lock:
             primary = list(self._desktop_ids if preferred == "desktop" else self._mobile_ids)
             secondary = list(self._mobile_ids if preferred == "desktop" else self._desktop_ids)
+            if tag is not None:
+                primary = [i for i in primary if tag in self._by_id[i].tags]
+                secondary = [i for i in secondary if tag in self._by_id[i].tags]
 
         fallback_used = False
         pool = primary

@@ -196,28 +196,56 @@ class WebDAVManager:
         collected: list[dict[str, object]] = []
         try:
             for orientation in ("desktop", "mobile"):
-                collected.extend(self._propfind(orientation))
+                root_items, collections = self._propfind_url(
+                    self._roots[orientation], orientation, tag_hint=None
+                )
+                collected.extend(root_items)
+                for collection_url, hint in collections:
+                    nested, _ignored = self._propfind_url(
+                        collection_url, orientation, tag_hint=hint
+                    )
+                    collected.extend(nested)
                 if len(collected) > self.settings.webdav_max_objects:
                     raise WebDAVError("PROPFIND object limit exceeded")
-            # Replace only after both roots succeeded and validated completely.
+            # Upsert instead of replacement: administrator enabled state and
+            # administrator-added tags must survive later synchronizations.
             with self._lock, db.get_conn(self.settings.database_path) as conn:
-                old_marks = {
-                    row["href"]: int(row["selected_mark"])
-                    for row in conn.execute("SELECT href, selected_mark FROM webdav_objects")
-                }
-                conn.execute("DELETE FROM webdav_objects")
+                conn.execute("UPDATE webdav_objects SET remote_present=0")
                 for item in collected:
                     conn.execute(
                         """INSERT INTO webdav_objects
-                        (href, orientation, etag, last_modified, content_length,
-                         content_type, updated_at, selected_mark)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (
-                            item["href"], item["orientation"], item["etag"],
-                            item["last_modified"], item["content_length"],
-                            item["content_type"], db.utc_now(), old_marks.get(str(item["href"]), 0),
-                        ),
+                        (href,orientation,etag,last_modified,content_length,
+                         content_type,updated_at,selected_mark,enabled,remote_present,tag_hint)
+                        VALUES (?,?,?,?,?,?,?,0,1,1,?)
+                        ON CONFLICT(href) DO UPDATE SET
+                          orientation=excluded.orientation,etag=excluded.etag,
+                          last_modified=excluded.last_modified,
+                          content_length=excluded.content_length,
+                          content_type=excluded.content_type,
+                          updated_at=excluded.updated_at,remote_present=1,
+                          tag_hint=excluded.tag_hint""",
+                        (item["href"], item["orientation"], item["etag"],
+                         item["last_modified"], item["content_length"],
+                         item["content_type"], db.utc_now(), item["tag_hint"]),
                     )
+                    hint = item.get("tag_hint")
+                    if hint:
+                        try:
+                            tag_id = db.ensure_tag(conn, str(hint), str(hint))
+                        except ValueError:
+                            continue
+                        conn.execute(
+                            """INSERT OR IGNORE INTO webdav_object_tags
+                            (href,tag_id,origin,created_at) VALUES(?,?,'remote',?)""",
+                            (item["href"], tag_id, db.utc_now()),
+                        )
+                # A changed/removed remote hint removes only remote-owned links;
+                # admin-owned links are never overwritten by synchronization.
+                conn.execute("""DELETE FROM webdav_object_tags
+                    WHERE origin='remote' AND NOT EXISTS (
+                      SELECT 1 FROM webdav_objects o JOIN tags t ON t.slug=o.tag_hint
+                      WHERE o.href=webdav_object_tags.href
+                        AND t.id=webdav_object_tags.tag_id AND o.remote_present=1)""")
             self.last_sync_at = db.utc_now()
             self.last_sync_error = None
         except Exception as exc:
@@ -232,17 +260,22 @@ class WebDAVManager:
         }
 
     def _propfind(self, orientation: Orientation) -> list[dict[str, object]]:
+        items, _collections = self._propfind_url(
+            self._roots[orientation], orientation, tag_hint=None
+        )
+        return items
+
+    def _propfind_url(
+        self, url: str, orientation: Orientation, tag_hint: str | None
+    ) -> tuple[list[dict[str, object]], list[tuple[str, str]]]:
         root = self._roots[orientation]
         response = self._request(
-            "PROPFIND",
-            root,
+            "PROPFIND", url,
             headers={"Depth": "1", "Content-Type": "application/xml; charset=utf-8"},
-            content=(
-                b'<?xml version="1.0" encoding="utf-8"?>'
-                b'<d:propfind xmlns:d="DAV:"><d:prop><d:getetag/>'
-                b'<d:getlastmodified/><d:getcontentlength/><d:getcontenttype/>'
-                b'<d:resourcetype/></d:prop></d:propfind>'
-            ),
+            content=(b'<?xml version="1.0" encoding="utf-8"?>'
+                     b'<d:propfind xmlns:d="DAV:"><d:prop><d:getetag/>'
+                     b'<d:getlastmodified/><d:getcontentlength/><d:getcontenttype/>'
+                     b'<d:resourcetype/></d:prop></d:propfind>'),
         )
         try:
             if response.status_code != 207:
@@ -258,6 +291,8 @@ class WebDAVManager:
         except ElementTree.ParseError as exc:
             raise WebDAVError("invalid XML response") from exc
         result: list[dict[str, object]] = []
+        collections: list[tuple[str, str]] = []
+        base_path = urlsplit(url).path.rstrip("/") + "/"
         for node in document.findall("{DAV:}response"):
             href_node = node.find("{DAV:}href")
             if href_node is None or not href_node.text:
@@ -265,11 +300,20 @@ class WebDAVManager:
             href = self.validate_href(href_node.text.strip(), orientation)
             prop = None
             for propstat in node.findall("{DAV:}propstat"):
-                status = (propstat.findtext("{DAV:}status") or "")
-                if " 200 " in status:
-                    prop = propstat.find("{DAV:}prop")
-                    break
-            if prop is None or prop.find("{DAV:}resourcetype/{DAV:}collection") is not None:
+                if " 200 " in (propstat.findtext("{DAV:}status") or ""):
+                    prop = propstat.find("{DAV:}prop"); break
+            if prop is None:
+                continue
+            is_collection = prop.find("{DAV:}resourcetype/{DAV:}collection") is not None
+            if is_collection:
+                path = urlsplit(href).path.rstrip("/") + "/"
+                relative = unquote(path[len(base_path):]).strip("/") if path.startswith(base_path) else ""
+                if tag_hint is None and relative and "/" not in relative:
+                    try:
+                        hint = db.validate_slug(relative)
+                    except ValueError:
+                        continue
+                    collections.append((href.rstrip("/") + "/", hint))
                 continue
             suffix = Path(unquote(urlsplit(href).path)).suffix.lower()
             if suffix not in SUPPORTED_EXTENSIONS:
@@ -279,30 +323,27 @@ class WebDAVManager:
                 content_length = int(length_text) if length_text else None
             except ValueError as exc:
                 raise WebDAVError("invalid remote object size") from exc
-            if content_length is not None and (
-                content_length < 0 or content_length > self.settings.webdav_max_download_bytes
-            ):
+            if content_length is not None and (content_length < 0 or content_length > self.settings.webdav_max_download_bytes):
                 continue
-            result.append(
-                {
-                    "href": href,
-                    "orientation": orientation,
-                    "etag": prop.findtext("{DAV:}getetag"),
-                    "last_modified": prop.findtext("{DAV:}getlastmodified"),
-                    "content_length": content_length,
-                    "content_type": prop.findtext("{DAV:}getcontenttype"),
-                }
-            )
-            if len(result) > self.settings.webdav_max_objects:
-                raise WebDAVError("PROPFIND object limit exceeded")
-        return result
+            result.append({"href": href, "orientation": orientation,
+                "etag": prop.findtext("{DAV:}getetag"),
+                "last_modified": prop.findtext("{DAV:}getlastmodified"),
+                "content_length": content_length,
+                "content_type": prop.findtext("{DAV:}getcontenttype"),
+                "tag_hint": tag_hint})
+        return result, collections
 
-    def _choose_object(self, orientation: Orientation) -> sqlite3.Row:
+    def _choose_object(self, orientation: Orientation, tag: str | None = None) -> sqlite3.Row:
         with self._lock, db.get_conn(self.settings.database_path) as conn:
             rows = list(
                 conn.execute(
-                    "SELECT * FROM webdav_objects WHERE orientation=? ORDER BY href",
-                    (orientation,),
+                    """SELECT o.* FROM webdav_objects o
+                    WHERE o.orientation=? AND o.enabled=1 AND o.remote_present=1
+                      AND (? IS NULL OR EXISTS (
+                        SELECT 1 FROM webdav_object_tags ot JOIN tags t ON t.id=ot.tag_id
+                        WHERE ot.href=o.href AND t.slug=? AND t.enabled=1))
+                    ORDER BY o.href""",
+                    (orientation, tag, tag),
                 )
             )
             if not rows:
@@ -310,7 +351,7 @@ class WebDAVManager:
             unselected = [row for row in rows if int(row["selected_mark"]) == 0]
             if not unselected:
                 conn.execute(
-                    "UPDATE webdav_objects SET selected_mark=0 WHERE orientation=?",
+                    "UPDATE webdav_objects SET selected_mark=0 WHERE orientation=? AND enabled=1 AND remote_present=1",
                     (orientation,),
                 )
                 unselected = rows
@@ -318,8 +359,8 @@ class WebDAVManager:
             conn.execute("UPDATE webdav_objects SET selected_mark=1 WHERE href=?", (row["href"],))
             return row
 
-    def fetch(self, orientation: Orientation) -> CachedImage:
-        row = self._choose_object(orientation)
+    def fetch(self, orientation: Orientation, tag: str | None = None) -> CachedImage:
+        row = self._choose_object(orientation, tag)
         return self.fetch_href(row["href"], orientation)
 
     def fetch_href(self, href: str, orientation: Orientation) -> CachedImage:
@@ -456,12 +497,17 @@ class WebDAVManager:
         with db.get_conn(self.settings.database_path) as conn:
             conn.execute("UPDATE webdav_cache SET accessed_at=? WHERE href=?", (now, href))
 
-    def cached_candidates(self, orientation: Orientation) -> list[CachedImage]:
+    def cached_candidates(self, orientation: Orientation, tag: str | None = None) -> list[CachedImage]:
         with db.get_conn(self.settings.database_path) as conn:
             rows = list(
                 conn.execute(
-                    "SELECT * FROM webdav_cache WHERE orientation=? ORDER BY accessed_at, href",
-                    (orientation,),
+                    """SELECT c.* FROM webdav_cache c JOIN webdav_objects o ON o.href=c.href
+                    WHERE c.orientation=? AND o.enabled=1
+                      AND (? IS NULL OR EXISTS (
+                        SELECT 1 FROM webdav_object_tags ot JOIN tags t ON t.id=ot.tag_id
+                        WHERE ot.href=c.href AND t.slug=? AND t.enabled=1))
+                    ORDER BY c.accessed_at,c.href""",
+                    (orientation, tag, tag),
                 )
             )
         return [image for row in rows if (image := self._cached_image(row)) is not None]
