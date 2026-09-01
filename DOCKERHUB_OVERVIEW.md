@@ -4,22 +4,19 @@ Random Image API V2 是 V1 的向后兼容扩展，增加 tags、多对多主题
 
 ## 发布状态（请先阅读）
 
-- **已发布并保留**：`qinlingmonkey/random-image-api:v1`
-- **尚未发布**：V2 Docker Hub 镜像
-- **当前 V2 部署方式**：获取源码后使用 `docker compose build` 与 `docker compose up -d`
+- **当前推荐版本**：`qinlingmonkey/random-image-api:v2`
+- **平台**：`linux/amd64`
+- **Registry 摘要**：`sha256:22097fbcb95a953c99a4c32a4c0381bfdc817bc25e6e2825272694a1d9d126cb`
+- **兼容回滚版本**：`qinlingmonkey/random-image-api:v1`，继续保留且不会被 V2 覆盖
 
-V2 仅在计划中，本文不提供虚构的 `:v2` 拉取命令。需要稳定 V1 镜像的用户可以继续使用 `:v1`；需要 V2 功能的用户应从源码构建。
+V2 是 V1 的扩展：旧的 `/random`、`?type=`、本地图库和 WebDAV Hybrid 部署可以继续使用；升级前仍应先备份 SQLite 与永久图片。
 
-## 1. 使用已发布的 V1 镜像
+## 1. 使用 V2 镜像快速部署
 
 创建持久化目录：
 
 ```bash
-mkdir -p random-image-api/data/images/desktop \
-  random-image-api/data/images/mobile \
-  random-image-api/data/database \
-  random-image-api/data/cache/webdav \
-  random-image-api/data/logs
+mkdir -p random-image-api/data/{images/desktop,images/mobile,database,cache/webdav,logs,tmp/admin}
 cd random-image-api
 sudo chown -R 1000:1000 data
 ```
@@ -29,7 +26,7 @@ sudo chown -R 1000:1000 data
 ```yaml
 services:
   api:
-    image: qinlingmonkey/random-image-api:v1
+    image: qinlingmonkey/random-image-api:v2
     restart: unless-stopped
     ports:
       - "10086:10086"
@@ -45,26 +42,42 @@ services:
       start_period: 15s
 ```
 
-生成管理令牌并安全写入 `.env`：
+创建 `.env`，管理 Token 与会话密钥必须分别随机生成：
 
 ```bash
-printf 'ADMIN_TOKEN=%s\n' "$(openssl rand -hex 32)" > .env
+cat > .env <<EOF
+APP_PORT=10086
+ADMIN_PATH=/manage-images
+ADMIN_TOKEN=$(openssl rand -hex 32)
+ADMIN_SESSION_SECRET=$(openssl rand -hex 32)
+ADMIN_COOKIE_SECURE=false
+STORAGE_MODE=local
+EOF
 chmod 600 .env
+
 docker compose pull
 docker compose up -d
 docker compose ps
 curl -fsS http://127.0.0.1:10086/health
 ```
 
-这是 V1，不能使用 tags、`/random/{slug}` 或 V2 管理 UI。V1 功能快照见 [docs/V1.md](docs/V1.md)。
+默认管理登录地址：
 
-## 2. 从源码构建 V2
+```text
+http://<主机>:10086/manage-images/login
+```
+
+直接通过 HTTP 测试时可使用 `ADMIN_COOKIE_SECURE=false`；生产环境应配置 HTTPS 反向代理并改为 `true`。仅修改 `ADMIN_PATH` 不能替代 Token、Session Cookie 与 CSRF 防护。
+
+## 2. 可选：从源码构建 V2
 
 ```bash
+git clone https://github.com/time-wanderer/random-image-api.git
+cd random-image-api
 cp .env.example .env
+# 分别生成并写入 ADMIN_TOKEN、ADMIN_SESSION_SECRET
 openssl rand -hex 32
 openssl rand -hex 32
-# 分别写入 ADMIN_TOKEN、ADMIN_SESSION_SECRET
 chmod 600 .env
 
 docker compose build
@@ -73,7 +86,7 @@ docker compose ps
 curl -fsS http://127.0.0.1:10086/health
 ```
 
-不要在 Compose 中写 `image: ...:v2` 并期待 Docker Hub 拉取。项目 Compose 使用本地 Dockerfile 构建 V2，`./data:/app/data` 保存永久数据。
+项目 Compose 使用本地 Dockerfile 构建，`./data:/app/data` 保存永久数据。当前 Docker Hub `v2` 仅提供 `linux/amd64`；ARM64 主机应从源码构建。
 
 常用维护：
 
@@ -207,8 +220,9 @@ openssl rand -hex 32
 ```bash
 ./scripts/backup.sh
 docker compose down
-# 切换到 V2 源码并补充 V2 环境变量
-docker compose build --pull
+# 把 Compose 镜像切换为 qinlingmonkey/random-image-api:v2，
+# 并补充 ADMIN_SESSION_SECRET 等 V2 环境变量
+docker compose pull
 docker compose up -d
 curl -fsS http://127.0.0.1:10086/health
 ```
@@ -224,7 +238,7 @@ RESTORE_CONFIRM=YES ./scripts/restore.sh /path/to/backup.tar.gz
 docker compose up -d
 ```
 
-备份包含永久图库、SQLite 一致性副本和脱敏配置；不包含可重建缓存与真实 Secret。迁移到新 VPS 时复制源码、备份归档和私下保存的配置，在新机恢复后从源码构建 V2。详见 [MIGRATION.md](MIGRATION.md)。
+备份包含永久图库、SQLite 一致性副本和脱敏配置；不包含可重建缓存与真实 Secret。迁移到新 VPS 时复制 Compose 配置、备份归档和私下保存的配置，在新机恢复后拉取 `v2`；也可复制源码后自行构建。详见 GitHub 仓库中的 `MIGRATION.md`。
 
 ## 10. 故障排查
 
@@ -235,4 +249,4 @@ docker compose up -d
 - Permission denied：确保挂载目录可由镜像内非 Root 用户写入。
 - WebDAV 主题未出现：主题必须是方向根目录下第一层、且名称可转换为合法 slug；然后重新同步。
 
-源码部署详情见 [README.md](README.md)。
+完整源码、V1 快照和迁移文档见：`https://github.com/time-wanderer/random-image-api`。

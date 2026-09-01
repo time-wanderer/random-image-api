@@ -2,7 +2,7 @@
 
 本文覆盖两类迁移：V1→V2 原地升级，以及把 V2 连同永久数据迁移到新 VPS。V2 是 V1 的向后兼容扩展，保留 `/random`、本地/Hybrid/WebDAV 90% 策略、缓存、importer 和 Backup / Restore。
 
-> Docker Hub 的 `qinlingmonkey/random-image-api:v1` 继续保留。V2 镜像仅计划发布，尚未发布；当前 V2 应从源码通过 Docker Compose 构建。
+> Docker Hub 已发布 `qinlingmonkey/random-image-api:v2`（`linux/amd64`，Registry 摘要 `sha256:22097fbcb95a953c99a4c32a4c0381bfdc817bc25e6e2825272694a1d9d126cb`）。`qinlingmonkey/random-image-api:v1` 继续保留，供旧部署和回滚使用。
 
 ## 1. 数据边界
 
@@ -32,11 +32,13 @@ curl -fsS http://127.0.0.1:10086/health
 
 把输出的备份文件复制到机器外部。另行安全保存真实配置；不要把 Secret 写进 Git 或迁移文档。
 
-### 2.2 停止并替换源码
+### 2.2 停止并切换到 V2
 
 ```bash
 docker compose down
-# 在当前项目目录切换/复制经过审核的 V2 源码
+# 使用镜像部署时，把 Compose 中的 image 改为：
+# image: qinlingmonkey/random-image-api:v2
+# 从源码部署时，切换/复制经过审核的 V2 源码
 cp .env.example .env.example.v2-reference
 ```
 
@@ -49,10 +51,11 @@ openssl rand -hex 32
 
 分别写入 `ADMIN_TOKEN` 与 `ADMIN_SESSION_SECRET`。仅使用生成命令，不在文档、聊天或日志里粘贴真实值。
 
-### 2.3 重建并触发原地迁移
+### 2.3 启动并触发原地迁移
 
 ```bash
-docker compose build --pull
+docker compose pull       # Docker Hub 镜像部署
+# docker compose build --pull  # 仅源码构建时使用
 docker compose up -d
 docker compose ps
 docker compose logs --tail=100 api
@@ -182,7 +185,7 @@ curl -fsS -X POST -H 'X-Admin-Token: <ADMIN_TOKEN>' \
 - [ ] 升级/迁移前健康检查正常。
 - [ ] 已生成备份并复制到机器外。
 - [ ] 已安全保存真实配置，未提交 Secret。
-- [ ] V2 从源码经 Docker Compose 构建；未误用不存在的 `:v2` 镜像。
+- [ ] 使用 `qinlingmonkey/random-image-api:v2` 拉取部署，或从已审核源码经 Docker Compose 构建。
 - [ ] Restore 完成，图库和 SQLite 均存在。
 - [ ] `/health`、V1 随机接口、主题接口已验证。
 - [ ] 管理 UI 安全与写操作已抽查。

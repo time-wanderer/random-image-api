@@ -4,18 +4,20 @@
 
 本报告记录 Random Image API V2 文档与当前本地实现的状态。V2 是 V1 的向后兼容扩展：保留 `/random`、`?type=`、本地图库、WebDAV Hybrid、默认 90% 远程优先、缓存、归档 importer、Backup / Restore，并新增 tags、多对多主题、主题接口和管理 UI。
 
-Docker Hub 状态必须区分：`qinlingmonkey/random-image-api:v1` 已发布并继续保留；V2 镜像仅计划发布，当前尚未发布。
+Docker Hub 已发布 `qinlingmonkey/random-image-api:v2`，V1 的 `qinlingmonkey/random-image-api:v1` 继续保留。V2 为 `linux/amd64`，Registry 摘要为 `sha256:22097fbcb95a953c99a4c32a4c0381bfdc817bc25e6e2825272694a1d9d126cb`。
 
 ## 2. 信息来源与调研说明
 
-本次**未进行网络调研**，不声称查阅了外部网站或在线文档。文档事实来自本地材料：
+实现与部署说明主要来自以下已实际核对的材料和环境：
 
 - 提交 `8235e19` 中的 V1 `README.md`；
 - 当前工作树的 V2 源码；
 - 当前测试代码；
 - `docker-compose.yml`、`.env.example`、Backup / Restore 脚本。
+- 测试 VPS 上的隔离 Docker Compose 构建、运行、管理 UI、归档和 Backup / Restore 验收；
+- Docker Hub Registry API 对 `v2` manifest、配置 Blob、摘要与平台的发布后回读。
 
-因此，Docker Hub V2 发布状态按任务给定事实记录为“计划中、未发布”，未通过网络核验仓库页面。
+本次未为技术选型重新进行广泛网络调研；FastAPI、SQLite、WebDAV 与 Docker Compose 的选型延续已交付 V1。Docker Hub 发布状态则已通过 Registry API 实际核验，不依赖页面展示推断。
 
 ## 3. 技术选择
 
@@ -87,7 +89,7 @@ V1→V2 原地升级采用“先备份、停服务、替换源码、补充配置
 | `README.md` | 重写为 V2 完整教程，说明兼容、API、WebDAV、管理 UI、配置、升级和备份 |
 | `MIGRATION.md` | 增加 V1→V2 原地迁移、回滚和跨 VPS 迁移步骤 |
 | `REPORT.md` | 真实记录本地来源、方案、测试状态、风险与待执行验收 |
-| `DOCKERHUB_OVERVIEW.md` | 明确 V1 已发布保留、V2 未发布；区分 V1 镜像与 V2 源码部署 |
+| `DOCKERHUB_OVERVIEW.md` | 以 V2 为主教程，提供镜像部署、管理 UI、主题 API、WebDAV、备份恢复，并保留 V1 回滚说明 |
 | `docs/V1.md` | 从提交 `8235e19` 提炼简洁 V1 快照，未长篇复制原文 |
 
 本次已修改应用源码、测试、公开环境模板、部署文件、恢复脚本与文档；未读取或修改现有 `.env`、业务图片/数据库/日志、`backups`、`dist` 或 `.a0proj`。
@@ -149,7 +151,7 @@ V1→V2 原地升级采用“先备份、停服务、替换源码、补充配置
 1. 中文标签显示名直接写入 HTTP Header 时，Starlette 的 Latin-1 编码会触发 `UnicodeEncodeError` 并返回 500。修复为保留 ASCII slug 的 `X-Image-Tag`，并将 `X-Image-Tag-Name` 按 UTF-8 百分号编码；新增中文回归测试。
 2. 网页上传先扫描文件、后写标签，成功路径没有在标签事务提交后再次刷新 Catalog，导致 SQLite 已有标签但主题 API 暂时返回 404。修复为标签提交后重新扫描，并增加上传及归档后的内存主题索引回归断言。
 
-Docker Hub `v2` 发布和发布后 Registry 摘要复验仍未执行，因此本报告当前不把镜像发布标记为完成。
+GitHub `main` 已同步 V2 源码提交 `304d5ff48dd6f82904066dd54aa436d651a997d5`。同一远程验收镜像已发布为 `qinlingmonkey/random-image-api:v2`；发布后通过 Docker Registry API 独立回读 manifest 和配置 Blob，确认摘要为 `sha256:22097fbcb95a953c99a4c32a4c0381bfdc817bc25e6e2825272694a1d9d126cb`、配置摘要为 `sha256:911fd314b95b6227a24f2100246d63cf0d1cdb29a7e46128fdab3a8c61e73357`、平台为 `linux/amd64`、共 10 层。
 
 ## 7. 已解决问题
 
@@ -168,7 +170,7 @@ Docker Hub `v2` 发布和发布后 Registry 摘要复验仍未执行，因此本
 
 ## 8. 未解决问题与已知风险
 
-- V2 Docker Hub 镜像尚未发布；当前只能从源码构建。发布完成后必须再更新本报告和使用教程。
+- 当前 `v2` 仅发布 `linux/amd64`；ARM64 主机需要自行从源码构建，或等待后续多架构镜像。
 - 管理会话与待确认 preview 存于单进程内存；容器重启会退出登录并使 preview 失效。这符合当前单实例设计，但不适用于多副本共享会话。
 - 管理 UI 应部署在 HTTPS 反向代理后；仅改变 `ADMIN_PATH` 不是访问控制。
 - `TRUSTED_PROXY_HEADERS=true` 只适合可信代理边界，直连公网时可能造成客户端 IP 日志被伪造。
@@ -178,7 +180,7 @@ Docker Hub `v2` 发布和发布后 Registry 摘要复验仍未执行，因此本
 
 ## 9. 后续建议
 
-1. 将当前验收通过的源码先推送 GitHub，并核对远端 commit。
-2. 将同一验收镜像发布为 `qinlingmonkey/random-image-api:v2`，再通过 Registry API 核对摘要与 `linux/amd64` 平台。
-3. Docker Hub V2 真正发布后更新 README、MIGRATION、REPORT 和 Docker Hub Overview；发布前保持“未发布”表述。
-4. 保留 V1 镜像与 `docs/V1.md`，为回滚和旧部署维护提供基线。
+1. 保留 V1 镜像与 `docs/V1.md`，为回滚和旧部署维护提供基线。
+2. 后续评估构建 `linux/arm64` 多架构镜像；发布前不要把当前 `v2` 描述为多架构。
+3. 生产部署应使用 HTTPS 反向代理、随机独立 Secret、WebDAV 只读应用账号，并定期把 Backup 复制到机器外。
+4. 关注 Starlette TestClient 的 `httpx2` 迁移弃用警告，在上游兼容窗口内更新测试依赖。

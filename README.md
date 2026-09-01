@@ -2,7 +2,7 @@
 
 Random Image API V2 是 V1 的**向后兼容扩展**：保留 V1 的 `GET /random`、`?type=`、本地图库、WebDAV Hybrid、默认 90% 远程优先、缓存、归档 importer、Backup / Restore，并新增主题标签和安全管理 UI。
 
-> 发布状态：Docker Hub 的 `qinlingmonkey/random-image-api:v1` 继续保留；V2 镜像仅在计划中，**尚未发布**。当前 V2 请从源码使用 Docker Compose 构建，不要尝试拉取 `:v2`。
+> 发布状态：Docker Hub 已发布 `qinlingmonkey/random-image-api:v2`（`linux/amd64`），V1 的 `qinlingmonkey/random-image-api:v1` 继续保留用于旧部署与回滚。V2 Registry 摘要为 `sha256:22097fbcb95a953c99a4c32a4c0381bfdc817bc25e6e2825272694a1d9d126cb`。
 
 V1 快照见 [docs/V1.md](docs/V1.md)，V1 原地升级和 VPS 迁移见 [MIGRATION.md](MIGRATION.md)。
 
@@ -31,9 +31,63 @@ Client
 
 标签 slug 只允许 1–63 位小写字母、数字和单连字符，不能使用保留路由名。显示名称与 slug 分离。`images ↔ tags`、`webdav_objects ↔ tags` 都是多对多关系。
 
-## 3. 从源码部署 V2
+## 3. 部署 V2
 
 要求：Linux、Docker Engine、Docker Compose Plugin。
+
+### 3.1 使用 Docker Hub 镜像
+
+创建项目目录和持久化目录：
+
+```bash
+mkdir -p random-image-api/data/{images/desktop,images/mobile,database,logs,cache/webdav,tmp/admin}
+cd random-image-api
+sudo chown -R 1000:1000 data
+```
+
+创建 `compose.yml`：
+
+```yaml
+services:
+  api:
+    image: qinlingmonkey/random-image-api:v2
+    restart: unless-stopped
+    ports:
+      - "10086:10086"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:10086/health', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+```
+
+创建 `.env`。两个 Secret 必须分别随机生成：
+
+```bash
+cat > .env <<EOF
+APP_PORT=10086
+ADMIN_PATH=/manage-images
+ADMIN_TOKEN=$(openssl rand -hex 32)
+ADMIN_SESSION_SECRET=$(openssl rand -hex 32)
+ADMIN_COOKIE_SECURE=false
+STORAGE_MODE=local
+EOF
+chmod 600 .env
+
+docker compose pull
+docker compose up -d
+docker compose ps
+curl -fsS http://127.0.0.1:10086/health
+```
+
+直接通过 HTTP 访问时可暂用 `ADMIN_COOKIE_SECURE=false`；生产环境应放在 HTTPS 反向代理后并改为 `true`。默认管理入口是 `http://服务器地址:10086/manage-images/login`。自定义路径不能替代 Token、Session Cookie 和 CSRF 防护。
+
+### 3.2 从源码构建
 
 ```bash
 cp .env.example .env
@@ -90,7 +144,7 @@ curl -D headers.txt -o image.bin 'http://127.0.0.1:10086/random?tag=anime&type=d
 若路径和查询同时给出标签，两者必须一致，否则返回 `400`。成功响应包含：
 
 - `X-Image-Tag`：标签 slug；无标签筛选时为 `untagged`。
-- `X-Image-Tag-Name`：主题显示名称（主题请求时）。
+- `X-Image-Tag-Name`：主题显示名称的 UTF-8 百分号编码（主题请求时）；客户端可使用 URL decode 还原中文。
 - `X-Image-Source`：`local`、`webdav-cache` 等来源。
 - `X-Fallback-Used`、`X-Remote-Fallback-Used`：方向或远端降级状态。
 
