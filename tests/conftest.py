@@ -21,6 +21,7 @@ def settings(tmp_path: Path) -> Settings:
     images_dir = data_dir / "images"
     (images_dir / "desktop").mkdir(parents=True)
     (images_dir / "mobile").mkdir(parents=True)
+    (images_dir / "square").mkdir(parents=True)
     return Settings(
         data_dir=data_dir,
         images_dir=images_dir,

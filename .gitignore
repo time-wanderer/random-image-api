@@ -33,6 +33,8 @@ data/images/**/*
 !data/images/desktop/.gitkeep
 !data/images/mobile/
 !data/images/mobile/.gitkeep
+!data/images/square/
+!data/images/square/.gitkeep
 data/database/*
 !data/database/.gitkeep
 data/logs/*

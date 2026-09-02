@@ -28,7 +28,7 @@ from typing import Any
 from urllib.parse import parse_qsl, quote, urlencode
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from PIL import Image, ImageOps, UnidentifiedImageError
 from starlette.datastructures import FormData, UploadFile
 
@@ -63,15 +63,19 @@ def _escape(value: object) -> str:
 
 def _page(title: str, body: str, csrf: str | None = None) -> HTMLResponse:
     token = "" if csrf is None else f'<meta name="csrf-token" content="{_escape(csrf)}">'
+    style = """<style>
+:root{color-scheme:light;--bg:#f4f7fb;--card:#fff;--text:#172033;--muted:#667085;--line:#dbe2ea;--primary:#2563eb;--danger:#b42318;--ok:#067647}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,sans-serif}header,main{width:min(1180px,calc(100% - 28px));margin:auto}header{padding:24px 0 12px}h1,h2,h3{line-height:1.2}nav{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 20px}nav a,.button,button{border:0;border-radius:8px;padding:9px 13px;background:var(--primary);color:#fff;text-decoration:none;cursor:pointer}button.danger{background:var(--danger)}button.secondary,.button.secondary{background:#475467}.panel,.card,.stat{background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:0 1px 2px #1018280d}.panel{padding:18px;margin:16px 0}.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}.stat{padding:16px}.stat strong{display:block;font-size:1.7rem}.grid{columns:4 230px;column-gap:14px}.card{display:inline-block;width:100%;overflow:hidden;margin:0 0 14px;break-inside:avoid}.card img,.placeholder{width:100%;height:190px;display:block;object-fit:cover;background:#e9eef5}.placeholder{display:grid;place-items:center;color:var(--muted)}.card-body{padding:13px}.actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.actions form{margin:0}.badge{display:inline-block;border-radius:999px;padding:3px 8px;margin:2px;background:#eef2f6;color:#344054;font-size:.82rem}.badge.ok{background:#ecfdf3;color:var(--ok)}.badge.off{background:#fef3f2;color:var(--danger)}form.filters,.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;align-items:end}label{display:block;font-weight:600}input,select{width:100%;padding:9px;border:1px solid #cbd5e1;border-radius:7px;background:#fff}input[type=checkbox]{width:auto}.check{font-weight:400;display:inline-flex;gap:6px;align-items:center}.muted{color:var(--muted);overflow-wrap:anywhere}.message{padding:10px;border-radius:8px;background:#eff6ff}.pager{justify-content:center}@media(max-width:640px){header,main{width:min(100% - 18px,1180px)}.grid{columns:1}.card img,.placeholder{height:230px}nav a{flex:1;text-align:center}.actions button{width:100%}}
+</style>"""
     return HTMLResponse(
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
         f"<meta name=\"viewport\" content=\"width=device-width\">{token}"
-        f"<title>{_escape(title)}</title></head><body><h1>{_escape(title)}</h1>{body}</body></html>"
+        f"<title>{_escape(title)}</title>{style}</head><body><header><h1>{_escape(title)}</h1></header><main>{body}</main></body></html>"
     )
 
 
 def _redirect(path: str, message: str | None = None) -> RedirectResponse:
-    target = path if not message else f"{path}?message={quote(message)}"
+    separator = "&" if "?" in path else "?"
+    target = path if not message else f"{path}{separator}message={quote(message)}"
     return RedirectResponse(target, status_code=303)
 
 
@@ -159,6 +163,38 @@ def _require_existing_tags(conn: Any, slugs: list[str]) -> dict[str, int]:
             raise ValueError(f"tag does not exist: {slug}")
         result[slug] = int(row["id"])
     return result
+
+
+def _safe_db_file(root_value: Path | str, stored_name: str) -> Path:
+    """安全解析数据库持有的相对路径，并拒绝越界和符号链接。"""
+    root = Path(root_value).resolve()
+    relative = Path(stored_name)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise HTTPException(400, "unsafe stored path")
+    lexical = root / relative
+    current = root
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise HTTPException(404, "file unavailable")
+    resolved = lexical.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(400, "unsafe stored path") from exc
+    if not resolved.is_file():
+        raise HTTPException(404, "file unavailable")
+    return resolved
+
+
+def _storage_group(rel_path: str) -> str:
+    parts = PurePosixPath(rel_path).parts
+    first = parts[0] if parts else "root"
+    return first if first in {"desktop", "mobile", "square"} else "root"
+
+
+def _like_pattern(value: str) -> str:
+    return "%" + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
 def create_admin_router(settings: Any) -> APIRouter:
@@ -382,9 +418,11 @@ def create_admin_router(settings: Any) -> APIRouter:
             tag_rows = conn.execute("SELECT slug,display_name FROM tags ORDER BY slug").fetchall()
         message = _escape(request.query_params.get("message", ""))
         body = (
-            f"<p>{message}</p><dl><dt>本地图片</dt><dd>{int(local)}（启用 {int(local_enabled)}）</dd>"
-            f"<dt>WebDAV</dt><dd>{int(remote)}（启用 {int(remote_enabled)}）</dd>"
-            f"<dt>WebDAV 缓存</dt><dd>{cached}</dd><dt>标签</dt><dd>{tags}</dd></dl>"
+            f'<p class="message">{message or "管理本地图库、WebDAV 索引、标签和导入任务。"}</p>'
+            f'<section class="stats"><article class="stat"><span>本地图片</span><strong>{int(local)}</strong><small>启用 {int(local_enabled)}</small></article>'
+            f'<article class="stat"><span>WebDAV</span><strong>{int(remote)}</strong><small>启用 {int(remote_enabled)}</small></article>'
+            f'<article class="stat"><span>WebDAV 缓存</span><strong>{cached}</strong><small>只展示已缓存预览</small></article>'
+            f'<article class="stat"><span>主题标签</span><strong>{tags}</strong><small>支持一图多标签</small></article></section>'
             f'<nav><a href="{admin_path}/images?source=local">本地图片</a> '
             f'<a href="{admin_path}/images?source=webdav">WebDAV 图片</a> <a href="{admin_path}/tags">标签</a></nav>'
             f'<h2>上传图片</h2><form method="post" action="{admin_path}/upload" enctype="multipart/form-data">{hidden(session.csrf)}'
@@ -396,100 +434,153 @@ def create_admin_router(settings: Any) -> APIRouter:
         )
         return _page("管理总览", body, session.csrf)
 
+    @router.get("/images/{image_id}/preview")
+    def local_preview(image_id: int, request: Request):
+        authenticate(request)
+        with db.get_conn(settings.database_path) as conn:
+            row = conn.execute("SELECT rel_path,content_type,source FROM images WHERE id=?", (image_id,)).fetchone()
+        if row is None or row["source"] != "local":
+            raise HTTPException(404, "local image not found")
+        target = _safe_db_file(settings.images_dir, str(row["rel_path"]))
+        return FileResponse(target, media_type=str(row["content_type"]), headers={"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff"})
+
+    @router.get("/webdav/preview")
+    def webdav_preview(request: Request, href: str):
+        authenticate(request)
+        with db.get_conn(settings.database_path) as conn:
+            row = conn.execute("SELECT c.cache_name,c.content_type FROM webdav_cache c JOIN webdav_objects o ON o.href=c.href WHERE c.href=?", (href,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "cached preview not found")
+        target = _safe_db_file(settings.cache_dir, str(row["cache_name"]))
+        return FileResponse(target, media_type=str(row["content_type"]), headers={"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff"})
+
     @router.get("/images", response_class=HTMLResponse)
-    def images(request: Request, page: int = 1, per_page: int = 0, orientation: str = "", source: str = "local", cached: str = "", enabled: str = "", tag: str = "") -> HTMLResponse:
+    def images(request: Request, page: int = 1, per_page: int = 0, orientation: str = "", source: str = "local", cached: str = "", enabled: str = "", tag: str = "", storage: str = "", q: str = "") -> HTMLResponse:
         _sid, session = authenticate(request)
         source = source if source in {"local", "webdav"} else "local"
         page = max(1, page)
         per_page = int(getattr(settings, "admin_page_size", 20)) if per_page <= 0 else min(100, max(1, per_page))
-        filters = {"source": source, "per_page": per_page, "orientation": orientation, "cached": cached, "enabled": enabled, "tag": tag}
-        nav = f'<nav><a href="{admin_path}">总览</a> <a href="{admin_path}/images?source=local">本地</a> <a href="{admin_path}/images?source=webdav">WebDAV</a> <a href="{admin_path}/tags">标签</a></nav>'
+        orientation = orientation if orientation in {"desktop", "mobile", "square"} else ""
+        enabled = enabled if enabled in {"0", "1"} else ""
+        cached = cached if cached in {"0", "1"} else ""
+        storage = storage if storage in {"root", "desktop", "mobile", "square"} else ""
+        q = q.strip()[:100]
+        filters = {"source": source, "per_page": per_page, "orientation": orientation, "cached": cached, "enabled": enabled, "tag": tag, "storage": storage, "q": q}
+        nav = f'<nav><a href="{admin_path}">总览</a><a href="{admin_path}/images?source=local">本地图片</a><a href="{admin_path}/images?source=webdav">WebDAV</a><a href="{admin_path}/tags">标签</a></nav>'
         with db.get_conn(settings.database_path) as conn:
+            all_tags = conn.execute("SELECT id,slug,display_name,enabled FROM tags ORDER BY slug").fetchall()
+            if tag and conn.execute("SELECT 1 FROM tags WHERE slug=? COLLATE NOCASE", (tag,)).fetchone() is None:
+                tag = ""; filters["tag"] = ""
+            clauses: list[str] = []
+            args: list[object] = []
             if source == "webdav":
-                clauses, args = ["1=1"], []
-                if orientation in {"desktop", "mobile"}:
-                    clauses.append("o.orientation=?"); args.append(orientation)
-                if enabled in {"0", "1"}:
-                    clauses.append("o.enabled=?"); args.append(int(enabled))
-                if cached in {"0", "1"}:
-                    clauses.append("c.href IS NOT NULL" if cached == "1" else "c.href IS NULL")
-                if tag:
-                    clauses.append("EXISTS(SELECT 1 FROM webdav_object_tags x JOIN tags t ON t.id=x.tag_id WHERE x.href=o.href AND t.slug=?)"); args.append(tag)
+                clauses.append("1=1")
+                if orientation in {"desktop", "mobile", "square"}: clauses.append("o.orientation=?"); args.append(orientation)
+                if enabled: clauses.append("o.enabled=?"); args.append(int(enabled))
+                if cached: clauses.append("c.href IS NOT NULL" if cached == "1" else "c.href IS NULL")
+                if tag: clauses.append("EXISTS(SELECT 1 FROM webdav_object_tags x JOIN tags t ON t.id=x.tag_id WHERE x.href=o.href AND t.slug=? COLLATE NOCASE)"); args.append(tag)
+                if q: clauses.append("o.href LIKE ? ESCAPE '\\'"); args.append(_like_pattern(q))
                 where = " WHERE " + " AND ".join(clauses)
                 total = int(conn.execute("SELECT COUNT(*) FROM webdav_objects o LEFT JOIN webdav_cache c ON c.href=o.href" + where, args).fetchone()[0])
-                rows = conn.execute("SELECT o.href,o.orientation,o.enabled,c.href IS NOT NULL cached FROM webdav_objects o LEFT JOIN webdav_cache c ON c.href=o.href" + where + " ORDER BY o.href LIMIT ? OFFSET ?", (*args, per_page, (page - 1) * per_page)).fetchall()
-                items = []
+                rows = conn.execute("SELECT o.href,o.orientation,o.enabled,c.href IS NOT NULL cached FROM webdav_objects o LEFT JOIN webdav_cache c ON c.href=o.href" + where + " ORDER BY o.href LIMIT ? OFFSET ?", (*args, per_page, (page-1)*per_page)).fetchall()
+                cards = []
                 for row in rows:
-                    href = _escape(row["href"])
-                    tags = conn.execute("SELECT t.id,t.slug FROM webdav_object_tags ot JOIN tags t ON t.id=ot.tag_id WHERE ot.href=? ORDER BY t.slug", (row["href"],)).fetchall()
-                    tag_forms = "".join(f'{_escape(item["slug"])}<form method="post" action="{admin_path}/webdav/tags/remove">{hidden(session.csrf)}<input type="hidden" name="href" value="{href}"><input type="hidden" name="tag_id" value="{int(item["id"])}"><button>移除标签</button></form>' for item in tags)
-                    toggle = f'<form method="post" action="{admin_path}/webdav/enabled">{hidden(session.csrf)}<input type="hidden" name="href" value="{href}"><input type="hidden" name="enabled" value="{1-int(row["enabled"])}"><button>{"禁用" if row["enabled"] else "启用"}</button></form>'
-                    items.append(f'<li>{href} {_escape(row["orientation"])} enabled={int(row["enabled"])} cached={int(row["cached"])} {toggle}{tag_forms}</li>')
-                listing = "".join(items)
-                heading = "WebDAV 图片"
+                    href_raw = str(row["href"]); href = _escape(href_raw)
+                    related = conn.execute("SELECT t.id,t.slug,t.enabled FROM webdav_object_tags x JOIN tags t ON t.id=x.tag_id WHERE x.href=? ORDER BY t.slug", (href_raw,)).fetchall()
+                    badges = "".join(f'<span class="badge{("" if x["enabled"] else " off")}">{_escape(x["slug"])}</span>' for x in related) or '<span class="muted">无标签</span>'
+                    choices = "".join(f'<option value="{int(x["id"])}">{_escape(x["slug"])}</option>' for x in all_tags if x["enabled"])
+                    media = f'<img loading="lazy" src="{admin_path}/webdav/preview?{_escape(urlencode({"href": href_raw}))}" alt="WebDAV 缓存预览">' if row["cached"] else '<div class="placeholder">未缓存，不自动下载</div>'
+                    forms = f'<form method="post" action="{admin_path}/webdav/enabled">{hidden(session.csrf)}<input type="hidden" name="href" value="{href}"><input type="hidden" name="enabled" value="{1-int(row["enabled"])}"><button class="secondary">{"禁用" if row["enabled"] else "启用"}</button></form>'
+                    forms += f'<form method="post" action="{admin_path}/webdav/tags">{hidden(session.csrf)}<input type="hidden" name="href" value="{href}"><select name="tag_id" required><option value="">选择标签</option>{choices}</select><select name="action"><option value="add">添加</option><option value="remove">移除</option></select><button>更新标签</button></form>'
+                    cards.append(f'<article class="card">{media}<div class="card-body"><div>{badges}</div><p class="muted">{href}</p><span class="badge">真实方向：{_escape(row["orientation"])}</span><span class="badge {"ok" if row["enabled"] else "off"}">{"启用" if row["enabled"] else "禁用"}</span><div class="actions">{forms}</div></div></article>')
+                heading = "WebDAV 图片"; listing = "".join(cards)
             else:
-                clauses, args = ["i.source='local'"], []
-                if orientation in {"desktop", "mobile", "square"}:
-                    clauses.append("i.orientation=?"); args.append(orientation)
-                if enabled in {"0", "1"}:
-                    clauses.append("i.enabled=?"); args.append(int(enabled))
-                if cached == "1":
-                    clauses.append("0=1")
-                if tag:
-                    clauses.append("EXISTS(SELECT 1 FROM image_tags x JOIN tags t ON t.id=x.tag_id WHERE x.image_id=i.id AND t.slug=?)"); args.append(tag)
+                clauses.append("i.source='local'")
+                if orientation: clauses.append("i.orientation=?"); args.append(orientation)
+                if enabled: clauses.append("i.enabled=?"); args.append(int(enabled))
+                if tag: clauses.append("EXISTS(SELECT 1 FROM image_tags x JOIN tags t ON t.id=x.tag_id WHERE x.image_id=i.id AND t.slug=? COLLATE NOCASE)"); args.append(tag)
+                if storage == "root": clauses.append("instr(i.rel_path,'/')=0")
+                elif storage: clauses.append("i.rel_path LIKE ? ESCAPE '\\'"); args.append(storage + "/%")
+                if q: clauses.append("i.rel_path LIKE ? ESCAPE '\\'"); args.append(_like_pattern(q))
                 where = " WHERE " + " AND ".join(clauses)
                 total = int(conn.execute("SELECT COUNT(*) FROM images i" + where, args).fetchone()[0])
-                rows = conn.execute("SELECT i.id,i.rel_path,i.orientation,i.enabled FROM images i" + where + " ORDER BY i.id DESC LIMIT ? OFFSET ?", (*args, per_page, (page - 1) * per_page)).fetchall()
-                items = []
+                rows = conn.execute("SELECT i.id,i.rel_path,i.orientation,i.enabled FROM images i" + where + " ORDER BY i.id DESC LIMIT ? OFFSET ?", (*args, per_page, (page-1)*per_page)).fetchall()
+                cards = []
+                choices = "".join(f'<option value="{int(x["id"])}">{_escape(x["slug"])}</option>' for x in all_tags if x["enabled"])
                 for row in rows:
-                    image_id = int(row["id"])
-                    toggle = f'<form method="post" action="{admin_path}/images/{image_id}/enabled">{hidden(session.csrf)}<input type="hidden" name="enabled" value="{1-int(row["enabled"])}"><button>{"禁用" if row["enabled"] else "启用"}</button></form>'
-                    delete = f'<form method="post" action="{admin_path}/images/{image_id}/delete">{hidden(session.csrf)}<input name="confirm" placeholder="输入 DELETE"><button>删除</button></form>'
-                    items.append(f'<li><label><input type="checkbox" form="batch-tags" name="image_ids" value="{image_id}">#{image_id} {_escape(row["rel_path"])} {_escape(row["orientation"])} enabled={int(row["enabled"])}</label>{toggle}{delete}</li>')
-                listing = "".join(items)
-                heading = "本地图片"
-        local_selected = " selected" if source == "local" else ""
-        webdav_selected = " selected" if source == "webdav" else ""
-        controls = (
-            f'<form method="get"><label>来源 <select name="source"><option value="local"{local_selected}>本地</option><option value="webdav"{webdav_selected}>WebDAV</option></select></label>'
-            f'<input name="orientation" value="{_escape(orientation)}" placeholder="desktop/mobile/square"><input name="cached" value="{_escape(cached)}" placeholder="cached 0/1">'
-            f'<input name="enabled" value="{_escape(enabled)}" placeholder="enabled 0/1"><input name="tag" value="{_escape(tag)}" placeholder="tag slug"><input name="per_page" value="{per_page}"><button>筛选</button></form>'
-        )
-        pager = []
-        if page > 1:
-            pager.append(f'<a rel="prev" href="{admin_path}/images?{_escape(urlencode({**filters, "page": page - 1}))}">上一页</a>')
-        if page * per_page < total:
-            pager.append(f'<a rel="next" href="{admin_path}/images?{_escape(urlencode({**filters, "page": page + 1}))}">下一页</a>')
-        batch = ""
-        if source == "local":
-            batch = (
-                f'<form id="batch-tags" method="post" action="{admin_path}/images/tags">{hidden(session.csrf)}'
-                '<input name="tag" required placeholder="已有标签 slug"><select name="action">'
-                '<option value="add">批量添加标签</option><option value="remove">批量移除标签</option>'
-                '</select><button>应用到所选本地图片</button></form>'
-            )
-        body = f'{nav}{controls}<h2>{heading}</h2><p>总计 {total}</p><ul>{listing}</ul>{batch}<nav>{" ".join(pager)}</nav>'
-        return _page("图片", body, session.csrf)
+                    iid=int(row["id"]); rel=_escape(row["rel_path"]); group=_storage_group(str(row["rel_path"]))
+                    related=conn.execute("SELECT t.slug,t.enabled FROM image_tags x JOIN tags t ON t.id=x.tag_id WHERE x.image_id=? ORDER BY t.slug",(iid,)).fetchall()
+                    badges="".join(f'<span class="badge{("" if x["enabled"] else " off")}">{_escape(x["slug"])}</span>' for x in related) or '<span class="muted">无标签</span>'
+                    toggle=f'<form method="post" action="{admin_path}/images/{iid}/enabled">{hidden(session.csrf)}<input type="hidden" name="enabled" value="{1-int(row["enabled"])}"><button class="secondary">{"禁用" if row["enabled"] else "启用"}</button></form>'
+                    delete=f'<form method="post" action="{admin_path}/images/{iid}/delete" onsubmit="return confirm(\'确定删除本地原图？此操作不可撤销。\')">{hidden(session.csrf)}<input type="hidden" name="confirm" value="1"><button class="danger">删除本地原图</button></form>'
+                    move=f'<form method="post" action="{admin_path}/images/{iid}/move">{hidden(session.csrf)}<select name="target" required><option value="desktop">desktop</option><option value="mobile">mobile</option><option value="square">square</option></select><button>移动归档</button></form>'
+                    tags_form=f'<form method="post" action="{admin_path}/images/{iid}/tags">{hidden(session.csrf)}<select name="tag_id" required><option value="">选择标签</option>{choices}</select><select name="action"><option value="add">添加</option><option value="remove">移除</option></select><button>更新标签</button></form>'
+                    cards.append(f'<article class="card"><img loading="lazy" src="{admin_path}/images/{iid}/preview" alt="本地图片 #{iid}"><div class="card-body"><label class="check"><input type="checkbox" form="batch-tags" name="image_ids" value="{iid}">选择 #{iid}</label><p class="muted">{rel}</p><span class="badge">真实方向：{_escape(row["orientation"])}</span><span class="badge">存放目录：{group}</span><span class="badge {"ok" if row["enabled"] else "off"}">{"启用" if row["enabled"] else "禁用"}</span><div>{badges}</div><div class="actions">{toggle}{move}{tags_form}{delete}</div></div></article>')
+                heading="本地图片"; listing="".join(cards)
+        def opts(values: list[tuple[str,str]], current: str) -> str:
+            return '<option value="">全部</option>'+''.join(f'<option value="{_escape(v)}"{" selected" if v==current else ""}>{_escape(label)}</option>' for v,label in values)
+        tag_opts='<option value="">全部标签</option>'+''.join(f'<option value="{_escape(x["slug"])}"{" selected" if x["slug"]==tag else ""}>{_escape(x["slug"])}</option>' for x in all_tags)
+        controls=f'<form class="filters panel" method="get"><label>来源<select name="source">{opts([("local","本地"),("webdav","WebDAV")],source)}</select></label><label>真实方向<select name="orientation">{opts([("desktop","desktop"),("mobile","mobile"),("square","square")],orientation)}</select></label><label>存放目录<select name="storage">{opts([("root","根目录"),("desktop","desktop"),("mobile","mobile"),("square","square")],storage)}</select></label><label>启用状态<select name="enabled">{opts([("1","启用"),("0","禁用")],enabled)}</select></label><label>缓存状态<select name="cached">{opts([("1","已缓存"),("0","未缓存")],cached)}</select></label><label>标签<select name="tag">{tag_opts}</select></label><label>文件名/HREF<input name="q" value="{_escape(q)}"></label><label>每页<select name="per_page">{opts([("12","12"),("20","20"),("40","40"),("80","80")],str(per_page))}</select></label><button>筛选</button></form>'
+        pager=[]
+        if page>1: pager.append(f'<a rel="prev" href="{admin_path}/images?{_escape(urlencode({**filters,"page":page-1}))}">上一页</a>')
+        if page*per_page<total: pager.append(f'<a rel="next" href="{admin_path}/images?{_escape(urlencode({**filters,"page":page+1}))}">下一页</a>')
+        batch=""
+        if source=="local":
+            candidates=''.join(f'<option value="{int(x["id"])}">{_escape(x["slug"])}</option>' for x in all_tags if x["enabled"])
+            batch=f'<form class="panel form-grid" id="batch-tags" method="post" action="{admin_path}/images/tags">{hidden(session.csrf)}<label>批量标签<select name="tag_id" required>{candidates}</select></label><label>操作<select name="action"><option value="add">添加</option><option value="remove">移除</option></select></label><button>应用到选中图片</button></form>'
+        return _page("图片",f'{nav}{controls}<h2>{heading}</h2><p>总计 {total}</p><section class="grid">{listing}</section>{batch}<nav class="pager">{" ".join(pager)}</nav>',session.csrf)
 
     @router.post("/images/tags")
     async def batch_tags(request: Request):
+        _sid,_session,form=await write_auth(request)
+        ids={int(v) for v in form.getlist("image_ids") if str(v).isdigit()}
+        if not ids: raise HTTPException(400,"no images selected")
+        action=str(form.get("action",""))
+        if action not in {"add","remove"}: raise HTTPException(400,"invalid action")
+        with db.get_conn(settings.database_path) as conn:
+            raw=str(form.get("tag_id",form.get("tag","")))
+            row=conn.execute("SELECT id FROM tags WHERE id=? AND enabled=1",(int(raw),)).fetchone() if raw.isdigit() else conn.execute("SELECT id FROM tags WHERE slug=? COLLATE NOCASE AND enabled=1",(db.validate_slug(raw),)).fetchone()
+            if row is None: raise HTTPException(404,"enabled tag not found")
+            tag_id=int(row["id"])
+            valid={int(x[0]) for x in conn.execute(f"SELECT id FROM images WHERE source='local' AND id IN ({','.join('?' for _ in ids)})",tuple(ids))}
+            if valid != ids: raise HTTPException(404,"local image not found")
+            for iid in ids:
+                if action=="add": conn.execute("INSERT OR IGNORE INTO image_tags(image_id,tag_id,created_at) VALUES(?,?,?)",(iid,tag_id,db.utc_now()))
+                else: conn.execute("DELETE FROM image_tags WHERE image_id=? AND tag_id=?",(iid,tag_id))
+        scan(request)
+        return _redirect(f"{admin_path}/images?source=local", "标签已更新")
+
+    @router.post("/images/{image_id}/tags")
+    async def image_tags(image_id: int, request: Request):
         _sid, _session, form = await write_auth(request)
-        ids = {int(value) for value in form.getlist("image_ids") if str(value).isdigit()}
-        if not ids:
-            raise HTTPException(400, "no images selected")
-        slug = db.validate_slug(str(form.get("tag", "")))
         action = str(form.get("action", ""))
         if action not in {"add", "remove"}:
             raise HTTPException(400, "invalid action")
+        raw_tag_id = str(form.get("tag_id", ""))
+        if not raw_tag_id.isdigit():
+            raise HTTPException(400, "invalid tag id")
+        tag_id = int(raw_tag_id)
         with db.get_conn(settings.database_path) as conn:
-            tag_id = db.ensure_tag(conn, slug)
-            for image_id in ids:
-                if action == "add":
-                    conn.execute("INSERT OR IGNORE INTO image_tags(image_id,tag_id,created_at) SELECT id,?,? FROM images WHERE id=?", (tag_id, db.utc_now(), image_id))
-                else:
-                    conn.execute("DELETE FROM image_tags WHERE image_id=? AND tag_id=?", (image_id, tag_id))
+            if conn.execute(
+                "SELECT 1 FROM images WHERE id=? AND source='local'", (image_id,)
+            ).fetchone() is None:
+                raise HTTPException(404, "local image not found")
+            if conn.execute(
+                "SELECT 1 FROM tags WHERE id=? AND enabled=1", (tag_id,)
+            ).fetchone() is None:
+                raise HTTPException(404, "enabled tag not found")
+            if action == "add":
+                conn.execute(
+                    "INSERT OR IGNORE INTO image_tags(image_id,tag_id,created_at) VALUES(?,?,?)",
+                    (image_id, tag_id, db.utc_now()),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM image_tags WHERE image_id=? AND tag_id=?",
+                    (image_id, tag_id),
+                )
         scan(request)
-        return _redirect(f"{admin_path}/images", "标签已更新")
+        return _redirect(f"{admin_path}/images?source=local", "图片标签已更新")
 
     @router.get("/tags", response_class=HTMLResponse)
     def tags(request: Request) -> HTMLResponse:
@@ -607,7 +698,7 @@ def create_admin_router(settings: Any) -> APIRouter:
                     if conn.execute("SELECT 1 FROM images WHERE content_hash=?", (digest,)).fetchone():
                         duplicates += 1; continue
                 orientation = classify_orientation(width, height)
-                group = orientation if orientation != "square" else ("desktop" if settings.square_policy in {"both", "desktop"} else "mobile")
+                group = orientation
                 target = Path(settings.images_dir) / group / f"{digest}{_FORMAT_EXTENSIONS[detected]}"
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if target.exists():
@@ -637,27 +728,74 @@ def create_admin_router(settings: Any) -> APIRouter:
             raise
         return _redirect(admin_path, f"上传 {len(written)}，重复 {duplicates}")
 
+    @router.post("/images/{image_id}/move")
+    async def move_image(image_id: int, request: Request):
+        _sid, _session, form = await write_auth(request)
+        target_group = str(form.get("target", ""))
+        if target_group not in {"desktop", "mobile", "square"}:
+            raise HTTPException(400, "invalid target directory")
+        images_root = Path(settings.images_dir).resolve()
+        target_dir = images_root / target_group
+        target_dir.mkdir(parents=True, exist_ok=True)
+        if target_dir.is_symlink() or target_dir.resolve().parent != images_root:
+            raise HTTPException(400, "unsafe target directory")
+        with db.get_conn(settings.database_path) as conn:
+            row = conn.execute(
+                "SELECT rel_path,source FROM images WHERE id=?", (image_id,)
+            ).fetchone()
+            if row is None or row["source"] != "local":
+                raise HTTPException(404, "local image not found")
+            source = _safe_db_file(images_root, str(row["rel_path"]))
+            if source.parent == target_dir:
+                return _redirect(f"{admin_path}/images?source=local", "图片已在目标目录")
+            candidate = target_dir / source.name
+            counter = 1
+            while candidate.exists():
+                candidate = target_dir / f"{source.stem}-{counter}{source.suffix}"
+                counter += 1
+            os.replace(source, candidate)
+            new_rel_path = candidate.relative_to(images_root).as_posix()
+            try:
+                conn.execute(
+                    "UPDATE images SET rel_path=?,mtime_ns=?,updated_at=? WHERE id=? AND source='local'",
+                    (new_rel_path, candidate.stat().st_mtime_ns, db.utc_now(), image_id),
+                )
+            except Exception:
+                os.replace(candidate, source)
+                raise
+        scan(request)
+        return _redirect(f"{admin_path}/images?source=local", "图片已移动")
+
     @router.post("/images/{image_id}/delete")
     async def delete_image(image_id: int, request: Request):
         _sid, _session, form = await write_auth(request)
-        if not hmac.compare_digest(str(form.get("confirm", "")), "DELETE"):
-            raise HTTPException(400, "confirm=DELETE required")
-        with db.get_conn(settings.database_path) as conn:
-            row = conn.execute("SELECT rel_path,source FROM images WHERE id=?", (image_id,)).fetchone()
-            if row is None:
-                raise HTTPException(404, "image not found")
-            if row["source"] != "local":
-                raise HTTPException(400, "only local images can be deleted")
-            root = Path(settings.images_dir).resolve()
-            target = (root / row["rel_path"]).resolve()
-            try:
-                target.relative_to(root)
-            except ValueError as exc:
-                raise HTTPException(400, "unsafe image path") from exc
-            target.unlink(missing_ok=True)
-            conn.execute("DELETE FROM images WHERE id=?", (image_id,))
+        confirmation = str(form.get("confirm", ""))
+        if confirmation not in {"1", "DELETE"}:
+            raise HTTPException(400, "explicit confirmation required")
+        quarantined: Path | None = None
+        target: Path | None = None
+        try:
+            with db.get_conn(settings.database_path) as conn:
+                row = conn.execute(
+                    "SELECT rel_path,source FROM images WHERE id=?", (image_id,)
+                ).fetchone()
+                if row is None:
+                    raise HTTPException(404, "image not found")
+                if row["source"] != "local":
+                    raise HTTPException(400, "only local images can be deleted")
+                target = _safe_db_file(settings.images_dir, str(row["rel_path"]))
+                quarantined = target.with_name(f".{target.name}.{secrets.token_hex(8)}.deleting")
+                os.replace(target, quarantined)
+                conn.execute("DELETE FROM images WHERE id=?", (image_id,))
+        except Exception:
+            if quarantined is not None and target is not None and quarantined.exists():
+                os.replace(quarantined, target)
+            raise
+        if quarantined is not None:
+            quarantined.unlink(missing_ok=True)
         scan(request)
-        return _redirect(f"{admin_path}/images", "图片已删除")
+        return _redirect(f"{admin_path}/images?source=local", "图片已删除")
+
 
     @router.post("/images/{image_id}/enabled")
     async def local_enabled(image_id: int, request: Request):
@@ -680,17 +818,44 @@ def create_admin_router(settings: Any) -> APIRouter:
                 raise HTTPException(404, "WebDAV object not found")
         return _redirect(f"{admin_path}/images?source=webdav", "WebDAV 状态已更新")
 
-    @router.post("/webdav/tags/remove")
-    async def webdav_remove_tag(request: Request):
+    async def update_webdav_tag(request: Request, force_remove: bool = False):
         _sid, _session, form = await write_auth(request)
         href = str(form.get("href", ""))
-        try:
-            tag_id = int(str(form.get("tag_id", "0")))
-        except ValueError as exc:
-            raise HTTPException(400, "invalid tag id") from exc
+        action = "remove" if force_remove else str(form.get("action", ""))
+        if action not in {"add", "remove"}:
+            raise HTTPException(400, "invalid action")
+        raw_tag_id = str(form.get("tag_id", ""))
+        if not raw_tag_id.isdigit():
+            raise HTTPException(400, "invalid tag id")
+        tag_id = int(raw_tag_id)
         with db.get_conn(settings.database_path) as conn:
-            conn.execute("DELETE FROM webdav_object_tags WHERE href=? AND tag_id=?", (href, tag_id))
-        return _redirect(f"{admin_path}/images?source=webdav", "WebDAV 标签已移除")
+            if conn.execute(
+                "SELECT 1 FROM webdav_objects WHERE href=?", (href,)
+            ).fetchone() is None:
+                raise HTTPException(404, "WebDAV object not found")
+            if conn.execute(
+                "SELECT 1 FROM tags WHERE id=? AND enabled=1", (tag_id,)
+            ).fetchone() is None:
+                raise HTTPException(404, "enabled tag not found")
+            if action == "add":
+                conn.execute(
+                    "INSERT OR IGNORE INTO webdav_object_tags(href,tag_id,origin,created_at) VALUES(?,?,'admin',?)",
+                    (href, tag_id, db.utc_now()),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM webdav_object_tags WHERE href=? AND tag_id=?",
+                    (href, tag_id),
+                )
+        return _redirect(f"{admin_path}/images?source=webdav", "WebDAV 标签已更新")
+
+    @router.post("/webdav/tags")
+    async def webdav_tags(request: Request):
+        return await update_webdav_tag(request)
+
+    @router.post("/webdav/tags/remove")
+    async def webdav_remove_tag(request: Request):
+        return await update_webdav_tag(request, force_remove=True)
 
     @router.post("/cache/clear")
     async def clear_cache(request: Request):

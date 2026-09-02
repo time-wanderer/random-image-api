@@ -1,12 +1,13 @@
-# Random Image API：Docker Hub 与 V2 部署说明
+# Random Image API：Docker Hub 与 V2.1 部署说明
 
-Random Image API V2 是 V1 的向后兼容扩展，增加 tags、多对多主题、主题随机接口和安全管理 UI，同时保留 V1 的 `/random`、本地/Hybrid、WebDAV 默认 90% 远程优先、缓存、importer 和 Backup / Restore。
+Random Image API V2 是 V1 的向后兼容扩展，增加 tags、多对多主题、主题随机接口和安全管理 UI，同时保留 V1 的 `/random`、本地/Hybrid、WebDAV 默认 90% 远程优先、缓存、importer 和 Backup / Restore。V2.1 继续兼容 V2.0 的 API 与数据库，重点改善管理网页、图片预览、目录整理和标签编辑体验。
 
 ## 发布状态（请先阅读）
 
-- **当前推荐版本**：`qinlingmonkey/random-image-api:v2`
+- **验收状态**：V2.1.0 已通过本地与远程隔离验收，完整测试为 `79 passed`
+- **当前已发布版本**：`qinlingmonkey/random-image-api:v2` 在本次发布完成前仍为 V2.0.0
 - **平台**：`linux/amd64`
-- **Registry 摘要**：`sha256:22097fbcb95a953c99a4c32a4c0381bfdc817bc25e6e2825272694a1d9d126cb`
+- **当前 Registry 摘要**：`sha256:22097fbcb95a953c99a4c32a4c0381bfdc817bc25e6e2825272694a1d9d126cb`；V2.1.0 发布后将重新回读并更新摘要
 - **兼容回滚版本**：`qinlingmonkey/random-image-api:v1`，继续保留且不会被 V2 覆盖
 
 V2 是 V1 的扩展：旧的 `/random`、`?type=`、本地图库和 WebDAV Hybrid 部署可以继续使用；升级前仍应先备份 SQLite 与永久图片。
@@ -16,7 +17,7 @@ V2 是 V1 的扩展：旧的 `/random`、`?type=`、本地图库和 WebDAV Hybri
 创建持久化目录：
 
 ```bash
-mkdir -p random-image-api/data/{images/desktop,images/mobile,database,cache/webdav,logs,tmp/admin}
+mkdir -p random-image-api/data/{images/desktop,images/mobile,images/square,database,cache/webdav,logs,tmp/admin}
 cd random-image-api
 sudo chown -R 1000:1000 data
 ```
@@ -128,9 +129,10 @@ curl -D - -o image.bin 'http://127.0.0.1:10086/random?tag=anime&type=mobile'
 ```text
 data/images/desktop/
 data/images/mobile/
+data/images/square/
 ```
 
-服务按真实宽高判断方向。V2 管理 UI 默认为：
+服务按真实宽高判断方向。正方形图片从 V2.1 起保存到 `square/`；`SQUARE_POLICY` 只控制随机池归属。旧位置中的正方形图片继续兼容，不会自动迁移。V2 管理 UI 默认为：
 
 ```text
 http://<主机>:10086/manage-images
@@ -138,12 +140,15 @@ http://<主机>:10086/manage-images
 
 可配置 `ADMIN_PATH`。管理 UI 支持：
 
+- 响应式统计卡片和本地图片瀑布流；
+- 仅管理员会话可访问的懒加载图片预览；
 - 创建、编辑、启停、合并标签；
-- 给一张图片关联多个标签；
+- 给单张或多张本地图片添加/移除标签；
+- 给 WebDAV 对象添加/移除标签；
 - 多文件上传、格式/像素/大小验证、哈希去重；
-- 删除本地原图，必须输入大写 `DELETE`；
-- WebDAV 对象启停与标签维护；
-- 缓存维护和清空。
+- 把本地图片移动到 `desktop`、`mobile` 或 `square`，且不改变真实方向；
+- 点击按钮后二次确认删除本地原图，不再手写 `DELETE`；
+- WebDAV 对象启停、缓存维护和清空；未缓存对象只显示占位，不自动下载。
 
 管理 UI 使用签名会话、HttpOnly / SameSite=Strict Cookie、登录限速与 CSRF。生产环境应置于 HTTPS 反向代理后，并设置独立随机的 `ADMIN_TOKEN` 与 `ADMIN_SESSION_SECRET`。
 

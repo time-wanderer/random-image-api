@@ -1,10 +1,10 @@
-# Random Image API V2 实施报告
+# Random Image API V2.1 实施报告
 
 ## 1. 报告范围
 
-本报告记录 Random Image API V2 文档与当前本地实现的状态。V2 是 V1 的向后兼容扩展：保留 `/random`、`?type=`、本地图库、WebDAV Hybrid、默认 90% 远程优先、缓存、归档 importer、Backup / Restore，并新增 tags、多对多主题、主题接口和管理 UI。
+本报告记录 Random Image API V2.1 文档与当前本地实现的状态。V2.1 保留 V1/V2 API、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、tags 和主题接口，重点优化管理 UI、图片预览、物理目录整理与标签编辑。
 
-Docker Hub 已发布 `qinlingmonkey/random-image-api:v2`，V1 的 `qinlingmonkey/random-image-api:v1` 继续保留。V2 为 `linux/amd64`，Registry 摘要为 `sha256:22097fbcb95a953c99a4c32a4c0381bfdc817bc25e6e2825272694a1d9d126cb`。
+V2.1.0 已通过本地与远程隔离验收，最终完整测试为 `79 passed`。在本次发布完成前，Docker Hub `qinlingmonkey/random-image-api:v2` 仍指向已发布的 V2.0.0（Registry 摘要 `sha256:22097fbcb95a953c99a4c32a4c0381bfdc817bc25e6e2825272694a1d9d126cb`）；`v1` 继续保留。GitHub 与 Docker Hub 的最终发布结果将在完成实际推送和 Registry 回读后补充。
 
 ## 2. 信息来源与调研说明
 
@@ -67,8 +67,8 @@ V2 可把 `desktop/`、`mobile/` 下第一层目录作为主题提示并写入�
 - 标签创建、编辑、启停和合并；
 - 图片多标签批量关联；
 - 多文件上传、真实格式/方向识别、像素和大小限制、哈希去重；
-- 本地图片删除，要求明确输入大写 `DELETE`；
-- WebDAV 对象启停、标签移除；
+- 本地图片使用按钮二次确认删除，服务端校验 CSRF 与明确确认字段，并兼容旧 `DELETE` 字段；
+- WebDAV 对象启停、标签添加与移除，但不提供远程原图删除；
 - WebDAV 缓存清空；
 - ZIP / TAR.GZ / TGZ 归档 preview-confirm。
 
@@ -79,6 +79,21 @@ V2 可把 `desktop/`、`mobile/` 下第一层目录作为主题提示并写入�
 Backup 保存本地永久图库、SQLite 一致性副本、公开模板和脱敏配置，不保存 WebDAV 缓存与真实 Secret。Restore 覆盖前先保存当前图库和数据库，并清理 SQLite WAL/SHM 残留。
 
 V1→V2 原地升级采用“先备份、停服务、替换源码、补充配置、Compose 重建、启动自动迁移、验收”的流程。跨 VPS 迁移采用源码 + 备份归档 + 私下保存配置三部分传输。
+
+### 4.6 V2.1 管理体验与目录整理
+
+V2.1 新增或完善：
+
+- 响应式统计卡片、筛选表单和图片瀑布流；
+- 仅管理员签名会话可访问的本地图片与 WebDAV 缓存预览；
+- WebDAV 未缓存对象使用占位卡片，打开管理页不会批量下载远端原图；
+- 本地图片在 `desktop`、`mobile`、`square` 之间安全移动，数据库 ID、标签和启停状态保持；
+- 上传与 importer 将正方形图片保存到独立 `data/images/square/`，`SQUARE_POLICY` 只控制随机池；
+- 删除改为按钮二次确认，服务端仍校验 CSRF 与明确确认字段；
+- 单张及批量本地图片标签添加/移除，以及 WebDAV 对象标签添加/移除；
+- 来源、真实方向、存放目录、启用、缓存、标签和文件名/HREF 筛选。
+
+预览路径只由数据库 ID 或精确 HREF 解析，执行登录校验、参数化查询、路径 containment 与符号链接拒绝。移动使用同文件系统 `os.replace`，数据库失败时回移；删除先把文件原子移动至隔离名称，数据库事务失败时恢复。WebDAV 不提供远程删除。
 
 ## 5. 本次文档工作
 
@@ -120,7 +135,37 @@ V1→V2 原地升级采用“先备份、停服务、替换源码、补充配置
 - 定向读取当前 V2 源码、测试、Compose、公开环境模板及 Backup / Restore 脚本；
 - 文档完成后执行限定检查：四份已跟踪文档的 `git diff --check -- README.md MIGRATION.md REPORT.md DOCKERHUB_OVERVIEW.md` 返回 `0`；新建 `docs/V1.md` 使用 `git diff --no-index --check /dev/null docs/V1.md` 检查，无 whitespace 诊断（新文件存在差异时该命令按设计返回 `1`）。
 
-### 6.4 最终验收
+### 6.4 V2.1 本地与浏览器验证
+
+主线程已实际执行：
+
+- 管理端与 importer 专项测试：`24 passed`；
+- 最终完整测试：`pytest -q`，`79 passed`，仅有 Starlette TestClient 的 `httpx2` 迁移弃用警告；
+- Python `compileall`、Shell 语法、`git diff --check`、Markdown 围栏、可提交文件 Secret 模式和运行数据跟踪检查均通过；
+- 新增回归覆盖管理员预览鉴权、图片瀑布流标记、预览 Content-Type 与缓存头、符号链接拒绝、Square 上传与 Restore 目录、移动时同名冲突、真实方向与存放目录分离、按钮删除确认、单图标签添加/移除、Catalog 立即刷新、WebDAV 标签添加/移除、已缓存预览和未缓存占位，以及 Docker ENTRYPOINT 可执行权限。
+
+V2.1 浏览器视觉检查使用 `/tmp` 全新数据目录、5 张隔离测试图和无头 Chromium 149 实际执行：管理员登录成功；桌面端按 CSS Columns 显示 4 列瀑布流；390×844 手机视口显示 1 列；本地图片预览、筛选区、真实方向、存放目录、Square 卡片和操作控件均渲染正常；两种视口都没有横向溢出。临时 Uvicorn、截图和 `/tmp` 数据已全部清理。
+
+### 6.5 V2.1 远程隔离 Docker 验收
+
+主线程在测试 VPS 的全新 `/tmp` 目录、独立 Compose 项目、独立镜像标签和未占用高位端口中完成验收。测试前记录服务器原有容器快照；清理后原有 10 个容器的名称、镜像和状态与测试前一致，未停止、替换或修改任何既有业务容器、目录或数据。
+
+- 最终候选源码归档经清单与路径审计，共 42 个文件，不含 `.env`、Git 元数据、业务图片、数据库、日志、缓存、备份包或镜像归档；
+- Compose 配置渲染、Docker 构建和最终镜像内完整测试通过，最终镜像 ID 为 `sha256:036bd4609853103fd179c8f17c7cacf897d915a5b644851a4663c7cabfdfe827`；
+- 镜像内完整测试为 `79 passed`，生产镜像内容在一次性测试容器运行前后保持不变；
+- Compose 容器达到 `healthy`，`/health` 返回版本 `2.1.0`，Uvicorn PID 1 以 UID `1000` 运行，SQLite `PRAGMA integrity_check=ok`；
+- 真实 HTTP 管理流程通过：未登录预览拒绝、登录与 CSRF、Square 上传到 `square/`、瀑布流卡片、受保护 PNG 预览、单图标签添加/移除、`desktop↔square` 移动且真实方向保持 Square、主题随机接口、缺少确认的删除拒绝以及 `confirm=1` 友好删除；
+- Backup/Restore 通过：备份包含 Square 原图和 SQLite 标签关系，不包含 WebDAV 缓存或测试 Secret；停止服务后恢复成功，恢复前后图片 ID、Square 路径、真实方向和主题关系一致，恢复后的主题接口返回可解码 PNG；
+- 本轮隔离容器、Compose 网络、源码目录与临时归档均已删除；仅保留经过验收的独立镜像用于发布，发布后再删除。
+
+远程验收实际发现并修复两个发布阻断问题：
+
+1. Git 索引记录 `docker-entrypoint.sh` 为可执行，但工作区归档曾保存为 `0600`，导致生产容器启动时报 `permission denied`。现由 Dockerfile 使用 `COPY --chmod=0755` 显式保证镜像内权限，并增加回归测试。
+2. Restore 脚本重建图片目录时遗漏空的 `square/`。现显式创建 `desktop/`、`mobile/`、`square/`，并增加脚本契约测试。
+
+### 6.6 V2.0 已发布版本的历史验收
+
+以下记录属于已发布 V2.0.0，作为 V2.1 验收前的历史基线：
 
 主线程已实际执行并通过：
 
@@ -131,7 +176,7 @@ V1→V2 原地升级采用“先备份、停服务、替换源码、补充配置
 - 对可提交源码、测试、脚本、文档和公开配置进行高置信 Secret / 私钥模式扫描：无命中；
 - Restore 预检使用 `/tmp` 隔离归档验证：安全归档接受，`../escape` 恶意成员拒绝。
 
-### 6.5 远程隔离 Docker 验收
+### 6.7 V2.0 远程隔离 Docker 验收
 
 主线程在测试 VPS 的全新目录、独立 Compose 项目、独立镜像标签和随机空闲高位端口中完成验收。测试前后均核对服务器原有容器集合，未停止、替换或修改任何既有业务容器、网络、目录或数据。
 

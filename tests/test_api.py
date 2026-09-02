@@ -215,3 +215,17 @@ def test_admin_rescan_requires_token(populated_settings: Settings) -> None:
         allowed = client.post("/admin/rescan", headers={"X-Admin-Token": "secret-token"})
         assert allowed.status_code == 200
         assert allowed.json()["status"] == "ok"
+
+
+def test_dockerfile_makes_entrypoint_executable() -> None:
+    """Archive/worktree modes must not make the production ENTRYPOINT unusable."""
+    dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text(encoding="utf-8")
+    assert "COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh" in dockerfile
+    assert 'ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]' in dockerfile
+
+
+def test_restore_recreates_all_orientation_directories() -> None:
+    restore = (Path(__file__).resolve().parents[1] / "scripts" / "restore.sh").read_text(encoding="utf-8")
+    assert '"${ROOT_DIR}/data/images/desktop"' in restore
+    assert '"${ROOT_DIR}/data/images/mobile"' in restore
+    assert '"${ROOT_DIR}/data/images/square"' in restore

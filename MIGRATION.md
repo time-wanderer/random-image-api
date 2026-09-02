@@ -1,8 +1,8 @@
-# Random Image API V2 迁移手册
+# Random Image API V2.1 迁移手册
 
-本文覆盖两类迁移：V1→V2 原地升级，以及把 V2 连同永久数据迁移到新 VPS。V2 是 V1 的向后兼容扩展，保留 `/random`、本地/Hybrid/WebDAV 90% 策略、缓存、importer 和 Backup / Restore。
+本文覆盖三类迁移：V1→V2 原地升级、V2.0→V2.1 兼容升级，以及把 V2 连同永久数据迁移到新 VPS。V2.1 不改变 API 和 SQLite schema，重点增加响应式图片管理、独立 `square/` 目录、图片移动归档和更完整的标签编辑。
 
-> Docker Hub 已发布 `qinlingmonkey/random-image-api:v2`（`linux/amd64`，Registry 摘要 `sha256:22097fbcb95a953c99a4c32a4c0381bfdc817bc25e6e2825272694a1d9d126cb`）。`qinlingmonkey/random-image-api:v1` 继续保留，供旧部署和回滚使用。
+> V2.1.0 已通过本地与远程隔离验收（完整测试 `79 passed`）。Docker Hub `qinlingmonkey/random-image-api:v2` 在本次发布完成前仍对应 V2.0.0（`linux/amd64`，摘要 `sha256:22097fbcb95a953c99a4c32a4c0381bfdc817bc25e6e2825272694a1d9d126cb`）；发布完成后同一 `v2` 标签将更新为 V2.1.0，`v1` 继续保留。
 
 ## 1. 数据边界
 
@@ -71,7 +71,27 @@ V2 首次连接旧 SQLite 时会幂等执行：
 
 旧图片默认仍是未打标签状态：`GET /random` 行为不变；只有关联标签后才会进入 `/random/{slug}` 或 `?tag=` 的主题结果。重复启动不会重复破坏数据。
 
-### 2.4 验证兼容接口与 V2
+### 2.4 V2.0→V2.1 兼容升级
+
+V2.1 沿用 schema version 2，不需要单独执行数据库迁移。升级前仍应运行 `./scripts/backup.sh`，然后拉取通过验收的新镜像并重建服务。
+
+V2.1 启动时会自动创建：
+
+```text
+data/images/square/
+```
+
+既有正方形图片即使位于根目录、`desktop/` 或 `mobile/` 仍能继续使用，不会被自动迁移。新上传或新导入的正方形图片进入 `square/`；需要整理旧文件时，可在管理网页中逐张移动。移动只改变物理归档目录，图片真实方向仍由像素宽高决定。
+
+升级后重点验收：
+
+- 管理页以瀑布流显示图片，预览只能在登录会话访问；
+- 本地图片可移动至 `desktop`、`mobile`、`square`；
+- 删除使用按钮二次确认，不再手写 `DELETE`；
+- 本地图片和 WebDAV 对象均可添加或移除标签；
+- WebDAV 未缓存对象只显示占位，不因打开管理页而下载原图。
+
+### 2.5 验证兼容接口与 V2
 
 ```bash
 curl -D - -o /dev/null http://127.0.0.1:10086/random
@@ -88,7 +108,7 @@ curl -D - -o /dev/null 'http://127.0.0.1:10086/random?tag=<slug>'
 
 Hybrid 用户还应同步 WebDAV，并核对第一层主题目录映射、缓存与故障降级。
 
-### 2.5 回滚到 V1
+### 2.6 回滚到 V1
 
 不要让 V1 长期直接写入已升级的 V2 数据库。安全回滚方式：
 
@@ -160,7 +180,7 @@ curl -D - -o /dev/null http://127.0.0.1:10086/random
 - 同一图片可同时从多个标签接口返回；
 - V1 `/random` 与 `?type=` 继续工作。
 
-管理验收：登录、标签增删改/合并、多图上传、删除确认、WebDAV 对象启停、缓存维护、归档 preview-confirm。归档 preview 绑定会话且有 TTL，迁移或重启前必须确认完成或重新预览。
+管理验收：登录、响应式瀑布流、受保护预览、标签增删改/合并、单图与批量标签、多图上传、三类目录移动、按钮删除确认、WebDAV 对象启停和标签维护、缓存维护、归档 preview-confirm。归档 preview 绑定会话且有 TTL，迁移或重启前必须确认完成或重新预览。
 
 ## 4. WebDAV 迁移注意事项
 

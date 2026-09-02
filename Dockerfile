@@ -17,14 +17,14 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends gosu \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 1000 --shell /usr/sbin/nologin appuser \
-    && mkdir -p /app/data/images/desktop /app/data/images/mobile /app/data/database /app/data/logs /app/data/cache/webdav/tmp /app/data/tmp/admin \
+    && mkdir -p /app/data/images/desktop /app/data/images/mobile /app/data/images/square /app/data/database /app/data/logs /app/data/cache/webdav/tmp /app/data/tmp/admin \
     && chown -R appuser:appuser /app
 
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY --chown=appuser:appuser app /app/app
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 EXPOSE 10086

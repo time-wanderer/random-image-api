@@ -75,6 +75,7 @@ def admin_env(tmp_path: Path):
         settings.images_dir.mkdir(parents=True, exist_ok=True)
         (settings.images_dir / "desktop").mkdir(exist_ok=True)
         (settings.images_dir / "mobile").mkdir(exist_ok=True)
+        (settings.images_dir / "square").mkdir(exist_ok=True)
         settings.database_path.parent.mkdir(parents=True, exist_ok=True)
         settings.cache_dir.mkdir(parents=True, exist_ok=True)
         (settings.cache_dir / "tmp").mkdir(exist_ok=True)
@@ -398,3 +399,166 @@ def test_duplicate_archive_merges_tags_and_complex_webdav_href_is_exact(admin_en
             assert int(conn.execute("SELECT enabled FROM webdav_objects WHERE href=?", (other_href,)).fetchone()[0]) == 1
             assert conn.execute("SELECT 1 FROM webdav_object_tags WHERE href=? AND tag_id=?", (href, remote_id)).fetchone() is None
             assert conn.execute("SELECT 1 FROM webdav_object_tags WHERE href=? AND tag_id=?", (other_href, remote_id)).fetchone() is not None
+
+
+def test_v21_masonry_preview_auth_square_upload_and_symlink_rejection(admin_env) -> None:
+    settings, app = admin_env
+    square = image_bytes("PNG", (32, 32))
+    with new_client(app) as client:
+        assert client.get(f"{ADMIN}/images/1/preview").status_code == 401
+        csrf = login(client)
+        uploaded = client.post(
+            f"{ADMIN}/upload",
+            data={"csrf": csrf},
+            files={"file": ("square.png", square, "image/png")},
+            follow_redirects=False,
+        )
+        assert uploaded.status_code == 303
+        with db.get_conn(settings.database_path) as conn:
+            row = conn.execute("SELECT id,rel_path,orientation FROM images").fetchone()
+            image_id = int(row["id"])
+            assert row["orientation"] == "square"
+            assert str(row["rel_path"]).startswith("square/")
+        page = client.get(f"{ADMIN}/images?source=local")
+        assert page.status_code == 200
+        assert 'class="grid"' in page.text
+        assert 'class="card"' in page.text
+        assert f"/images/{image_id}/preview" in page.text
+        assert "真实方向：square" in page.text
+        assert "存放目录：square" in page.text
+        rendered = client.get(f"{ADMIN}/images/{image_id}/preview")
+        assert rendered.status_code == 200
+        assert rendered.headers["content-type"].startswith("image/png")
+        assert rendered.headers["cache-control"] == "private, max-age=300"
+        assert rendered.headers["x-content-type-options"] == "nosniff"
+
+        outside = settings.data_dir / "outside.png"
+        outside.write_bytes(square)
+        stored = settings.images_dir / str(row["rel_path"])
+        stored.unlink()
+        stored.symlink_to(outside)
+        assert client.get(f"{ADMIN}/images/{image_id}/preview").status_code == 404
+
+
+def test_v21_move_conflict_single_tags_and_friendly_delete(admin_env) -> None:
+    settings, app = admin_env
+    with new_client(app) as client:
+        csrf = login(client)
+        for slug in ("genshin", "wallpaper"):
+            assert client.post(
+                f"{ADMIN}/tags",
+                data={"csrf": csrf, "slug": slug, "display_name": slug.title()},
+                follow_redirects=False,
+            ).status_code == 303
+        assert client.post(
+            f"{ADMIN}/upload",
+            data={"csrf": csrf},
+            files={"file": ("wide.png", image_bytes("PNG", (40, 10)), "image/png")},
+            follow_redirects=False,
+        ).status_code == 303
+        with db.get_conn(settings.database_path) as conn:
+            image = conn.execute("SELECT id,rel_path FROM images").fetchone()
+            image_id = int(image["id"])
+            tag_ids = {row["slug"]: int(row["id"]) for row in conn.execute("SELECT id,slug FROM tags")}
+        original = settings.images_dir / str(image["rel_path"])
+        conflict = settings.images_dir / "square" / original.name
+        conflict.write_bytes(b"occupied")
+        moved = client.post(
+            f"{ADMIN}/images/{image_id}/move",
+            data={"csrf": csrf, "target": "square"},
+            follow_redirects=False,
+        )
+        assert moved.status_code == 303, moved.text
+        with db.get_conn(settings.database_path) as conn:
+            updated = conn.execute("SELECT rel_path,orientation FROM images WHERE id=?", (image_id,)).fetchone()
+        assert str(updated["rel_path"]).startswith("square/")
+        assert str(updated["rel_path"]) != f"square/{original.name}"
+        assert updated["orientation"] == "desktop"
+        assert (settings.images_dir / str(updated["rel_path"])).is_file()
+        assert conflict.read_bytes() == b"occupied"
+
+        for slug in ("genshin", "wallpaper"):
+            assert client.post(
+                f"{ADMIN}/images/{image_id}/tags",
+                data={"csrf": csrf, "tag_id": str(tag_ids[slug]), "action": "add"},
+                follow_redirects=False,
+            ).status_code == 303
+        with db.get_conn(settings.database_path) as conn:
+            assert {row[0] for row in conn.execute(
+                "SELECT t.slug FROM image_tags x JOIN tags t ON t.id=x.tag_id WHERE x.image_id=?",
+                (image_id,),
+            )} == {"genshin", "wallpaper"}
+        record, fallback = app.state.catalog.pick("desktop", tag="genshin")
+        assert record.id == image_id and not fallback
+        assert client.post(
+            f"{ADMIN}/images/{image_id}/tags",
+            data={"csrf": csrf, "tag_id": str(tag_ids["wallpaper"]), "action": "remove"},
+            follow_redirects=False,
+        ).status_code == 303
+
+        page = client.get(f"{ADMIN}/images?source=local")
+        assert 'onsubmit="return confirm(' in page.text
+        assert 'name="confirm" value="1"' in page.text
+        assert "输入 DELETE" not in page.text
+        assert client.post(
+            f"{ADMIN}/images/{image_id}/delete",
+            data={"csrf": csrf, "confirm": "1"},
+            follow_redirects=False,
+        ).status_code == 303
+        assert not (settings.images_dir / str(updated["rel_path"])).exists()
+
+
+def test_v21_webdav_tag_edit_cached_preview_and_uncached_placeholder(admin_env) -> None:
+    settings, app = admin_env
+    cached_href = "https://dav.example.test/root/cached%2Fone.png"
+    uncached_href = "https://dav.example.test/root/uncached.png"
+    payload = image_bytes("PNG", (25, 10))
+    with new_client(app) as client:
+        csrf = login(client)
+        assert client.post(
+            f"{ADMIN}/tags",
+            data={"csrf": csrf, "slug": "remote-topic", "display_name": "Remote Topic"},
+            follow_redirects=False,
+        ).status_code == 303
+        cache_name = "cached-preview.png"
+        (settings.cache_dir / cache_name).write_bytes(payload)
+        with db.get_conn(settings.database_path) as conn:
+            tag_id = int(conn.execute("SELECT id FROM tags WHERE slug='remote-topic'").fetchone()[0])
+            now = db.utc_now()
+            for href in (cached_href, uncached_href):
+                conn.execute(
+                    "INSERT INTO webdav_objects(href,orientation,updated_at) VALUES(?,?,?)",
+                    (href, "desktop", now),
+                )
+            conn.execute(
+                "INSERT INTO webdav_cache(href,cache_name,orientation,width,height,content_type,file_size,fetched_at,accessed_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (cached_href, cache_name, "desktop", 25, 10, "image/png", len(payload), 1, 1),
+            )
+        page = client.get(f"{ADMIN}/images?source=webdav")
+        assert page.status_code == 200
+        assert "未缓存，不自动下载" in page.text
+        assert "/webdav/preview?href=" in page.text
+        cached_preview = client.get(f"{ADMIN}/webdav/preview", params={"href": cached_href})
+        assert cached_preview.status_code == 200
+        assert cached_preview.headers["content-type"].startswith("image/png")
+        assert client.get(f"{ADMIN}/webdav/preview", params={"href": uncached_href}).status_code == 404
+        assert client.post(
+            f"{ADMIN}/webdav/tags",
+            data={"csrf": csrf, "href": cached_href, "tag_id": str(tag_id), "action": "add"},
+            follow_redirects=False,
+        ).status_code == 303
+        with db.get_conn(settings.database_path) as conn:
+            assert conn.execute(
+                "SELECT origin FROM webdav_object_tags WHERE href=? AND tag_id=?",
+                (cached_href, tag_id),
+            ).fetchone()[0] == "admin"
+        assert client.post(
+            f"{ADMIN}/webdav/tags",
+            data={"csrf": csrf, "href": cached_href, "tag_id": str(tag_id), "action": "remove"},
+            follow_redirects=False,
+        ).status_code == 303
+        with db.get_conn(settings.database_path) as conn:
+            assert conn.execute(
+                "SELECT 1 FROM webdav_object_tags WHERE href=? AND tag_id=?",
+                (cached_href, tag_id),
+            ).fetchone() is None

@@ -113,9 +113,10 @@ def test_mixed_orientations_wrong_extensions_and_square_both(tmp_path: Path) -> 
 
     assert (summary.imported, summary.skipped) == (3, 1)
     assert (summary.desktop, summary.mobile, summary.square) == (1, 1, 1)
-    assert summary.square_both_storage == "desktop"
-    assert {path.suffix for path in (output / "desktop").iterdir()} == {".png", ".webp"}
+    assert summary.square_both_storage == "square"
+    assert {path.suffix for path in (output / "desktop").iterdir()} == {".png"}
     assert {path.suffix for path in (output / "mobile").iterdir()} == {".jpg"}
+    assert {path.suffix for path in (output / "square").iterdir()} == {".webp"}
     assert all(len(path.stem) == 64 for path in output.rglob("*.*"))
 
 

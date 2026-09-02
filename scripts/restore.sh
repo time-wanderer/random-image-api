@@ -66,7 +66,7 @@ if [[ -d "${ROOT_DIR}/data/database" ]]; then
 fi
 
 rm -rf "${ROOT_DIR}/data/images" "${ROOT_DIR}/data/database"
-mkdir -p "${ROOT_DIR}/data/images/desktop" "${ROOT_DIR}/data/images/mobile" "${ROOT_DIR}/data/database" "${ROOT_DIR}/data/logs"
+mkdir -p "${ROOT_DIR}/data/images/desktop" "${ROOT_DIR}/data/images/mobile" "${ROOT_DIR}/data/images/square" "${ROOT_DIR}/data/database" "${ROOT_DIR}/data/logs"
 
 if [[ -d "${STAGING_DIR}/data/images" ]]; then
   cp -a "${STAGING_DIR}/data/images/." "${ROOT_DIR}/data/images/"

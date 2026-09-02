@@ -1,18 +1,19 @@
-# Random Image API V2
+# Random Image API V2.1
 
-Random Image API V2 是 V1 的**向后兼容扩展**：保留 V1 的 `GET /random`、`?type=`、本地图库、WebDAV Hybrid、默认 90% 远程优先、缓存、归档 importer、Backup / Restore，并新增主题标签和安全管理 UI。
+Random Image API V2 是 V1 的**向后兼容扩展**：保留 V1 的 `GET /random`、`?type=`、本地图库、WebDAV Hybrid、默认 90% 远程优先、缓存、归档 importer、Backup / Restore，并新增主题标签和安全管理 UI。V2.1 在不改变 API 和数据库 schema 的前提下，重点优化管理网页与本地图片整理体验。
 
-> 发布状态：Docker Hub 已发布 `qinlingmonkey/random-image-api:v2`（`linux/amd64`），V1 的 `qinlingmonkey/random-image-api:v1` 继续保留用于旧部署与回滚。V2 Registry 摘要为 `sha256:22097fbcb95a953c99a4c32a4c0381bfdc817bc25e6e2825272694a1d9d126cb`。
+> 当前发布状态：V2.1.0 已通过本地和远程隔离验收，完整测试为 `79 passed`。Docker Hub 的 `qinlingmonkey/random-image-api:v2` 在本次发布完成前仍指向已发布的 V2.0.0（`linux/amd64`，摘要 `sha256:22097fbcb95a953c99a4c32a4c0381bfdc817bc25e6e2825272694a1d9d126cb`）；完成 GitHub 同步和 Registry 发布后将由 V2.1.0 更新同一 `v2` 标签。`qinlingmonkey/random-image-api:v1` 继续保留用于旧部署与回滚。
 
 V1 快照见 [docs/V1.md](docs/V1.md)，V1 原地升级和 VPS 迁移见 [MIGRATION.md](MIGRATION.md)。
 
-## 1. V2 新增能力
+## 1. V2 与 V2.1 能力
 
 - `tags` 主题模型：一张本地图片或一个 WebDAV 对象可关联多个标签，多对多关系不会复制图片文件。
 - `GET /random/{slug}` 与 `GET /random?tag={slug}`：按主题随机返回图片。
 - 严格主题语义：未知、禁用或非法标签返回 `404`；标签存在但没有可用图片也返回 `404`；数据库不可用或无法安全降级的远端故障返回 `503`。
 - WebDAV 第一层主题：在 `desktop/`、`mobile/` 下的第一层子目录名可作为标签提示，例如 `desktop/anime/a.jpg` 对应 `anime`。
-- 浏览器管理 UI：标签管理、多图上传、删除、WebDAV 对象启停与标签维护、缓存清理、归档 preview-confirm。
+- 浏览器管理 UI：响应式统计卡片、图片瀑布流、受保护预览、标签管理、多图上传、移动归档、友好删除确认、WebDAV 对象启停与标签维护、缓存清理、归档 preview-confirm。
+- V2.1 独立使用 `data/images/square/` 保存正方形图片；`SQUARE_POLICY` 只决定正方形图片进入哪些随机池，不再决定物理存放目录。
 - SQLite V1→V2 幂等原地迁移：启动时创建标签关系表并补充新字段，原有未打标签图片仍可由 `GET /random` 使用。
 
 ## 2. 架构与数据
@@ -40,7 +41,7 @@ Client
 创建项目目录和持久化目录：
 
 ```bash
-mkdir -p random-image-api/data/{images/desktop,images/mobile,database,logs,cache/webdav,tmp/admin}
+mkdir -p random-image-api/data/{images/desktop,images/mobile,images/square,database,logs,cache/webdav,tmp/admin}
 cd random-image-api
 sudo chown -R 1000:1000 data
 ```
@@ -164,9 +165,10 @@ curl -D headers.txt -o image.bin 'http://127.0.0.1:10086/random?tag=anime&type=d
 ```text
 data/images/desktop/
 data/images/mobile/
+data/images/square/
 ```
 
-程序仍以真实宽高分类，目录主要用于人工整理。等待周期扫描，或配置 `ADMIN_TOKEN` 后触发：
+程序始终以图片真实宽高分类；`desktop/`、`mobile/`、`square/` 是物理归档目录，便于人工整理，不会覆盖真实方向。V2.1 上传和归档 importer 会把正方形图片保存到 `square/`。旧版本中位于根目录、`desktop/` 或 `mobile/` 的正方形图片仍兼容，不会被强制移动。等待周期扫描，或配置 `ADMIN_TOKEN` 后触发：
 
 ```bash
 curl -fsS -X POST \
@@ -255,12 +257,15 @@ ADMIN_PAGE_SIZE=20
 
 ### 常用操作
 
-1. **标签**：创建、编辑、启用/禁用、合并；一张图可添加多个标签。
-2. **上传**：多文件上传，验证格式、像素和大小，按内容哈希去重，并按真实方向保存。
-3. **删除**：本地原图删除必须输入大写 `DELETE`；操作会删除文件和对应数据库记录。
-4. **WebDAV**：启用/禁用远端对象、维护标签；同步不会复活管理员已禁用的对象。
-5. **缓存**：可运行维护或清空 WebDAV 缓存；缓存可重建，不是永久图库。
-6. **归档**：先上传到 preview，系统执行完整安全校验和 dry-run；核对摘要、默认标签及第一层目录映射后再 confirm。preview 绑定当前会话、有 TTL，登出、过期或服务重启后不能确认。
+1. **瀑布流浏览**：本地图片以响应式卡片展示并使用浏览器懒加载；预览只能在管理员登录会话中访问，不暴露宿主机文件路径。当前直接传输原图供预览，不额外生成缩略图，超大原图较多时会增加浏览器流量。
+2. **方向与目录**：卡片分别显示“真实方向”和“存放目录”。管理员可把本地原图移动到 `desktop`、`mobile` 或 `square`，移动只改变归档位置，不伪造图片方向；同名冲突会生成安全的新文件名。
+3. **标签**：创建、编辑、启用/禁用、合并；每张本地图片和 WebDAV 对象均可直接添加或移除标签，本地图片还支持勾选后批量添加/移除。一张图可关联多个标签而不复制文件。
+4. **上传**：支持单图和多图上传，验证格式、像素和大小，按内容哈希去重，并按真实方向保存；正方形图片进入 `square/`。
+5. **删除**：点击“删除本地原图”后由浏览器二次确认，页面不再要求手写 `DELETE`；服务端仍要求明确确认字段和 CSRF。WebDAV 只允许禁用、维护标签或清理本地缓存，绝不远程删除原图。
+6. **WebDAV 预览**：已有本地缓存的远端对象可以预览；未缓存对象显示占位卡片，打开管理页不会批量下载远端原图。
+7. **筛选**：可按来源、真实方向、存放目录、启用状态、缓存状态、标签和文件名/HREF 筛选，并选择每页数量。
+8. **缓存**：可运行维护或清空 WebDAV 缓存；缓存可重建，不是永久图库。
+9. **归档**：先上传到 preview，系统执行完整安全校验和 dry-run；核对摘要、默认标签及第一层目录映射后再 confirm。preview 绑定当前会话、有 TTL，登出、过期或服务重启后不能确认。
 
 ## 8. 环境变量
 

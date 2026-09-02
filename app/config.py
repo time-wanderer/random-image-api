@@ -180,6 +180,7 @@ class Settings(BaseSettings):
         self.images_dir.mkdir(parents=True, exist_ok=True)
         (self.images_dir / "desktop").mkdir(parents=True, exist_ok=True)
         (self.images_dir / "mobile").mkdir(parents=True, exist_ok=True)
+        (self.images_dir / "square").mkdir(parents=True, exist_ok=True)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         assert self.cache_dir is not None

@@ -1,9 +1,9 @@
 """Secure image archive importer.
 
 The archive is completely validated before any member data is read.  Images are
-stored as ``<sha256>.<detected-format>`` below an orientation directory.
-For the ``both`` square policy, one canonical copy is stored under ``desktop``;
-the application catalog can expose square images to both client pools.
+stored as ``<sha256>.<detected-format>`` below its real orientation directory.
+Square files are stored once under ``square``; ``square_policy`` only controls
+which random-selection pools may use them.
 """
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ class ImportSummary:
     output_dir: str
     dry_run: bool
     square_policy: str
-    square_both_storage: str = "desktop"
+    square_both_storage: str = "square"
     members: int = 0
     files_examined: int = 0
     imported: int = 0
@@ -210,10 +210,14 @@ def _orientation(width: int, height: int) -> str:
 
 
 def _destination_orientation(orientation: str, square_policy: SquarePolicy) -> str:
-    if orientation != "square":
-        return orientation
-    # A single canonical path avoids duplicate content for policy=both.
-    return "desktop" if square_policy in {"both", "desktop"} else "mobile"
+    """Return the physical archive directory.
+
+    ``square_policy`` remains an accepted compatibility argument, but only
+    controls Catalog pool membership. Square files are always archived in the
+    dedicated ``square/`` directory.
+    """
+    del square_policy
+    return orientation
 
 
 def _open_archive(path: Path):
