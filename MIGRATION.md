@@ -2,7 +2,7 @@
 
 本文覆盖三类迁移：V1→V2 原地升级、V2.0→V2.1 兼容升级，以及把 V2 连同永久数据迁移到新 VPS。V2.1 不改变 API 和 SQLite schema，重点增加响应式图片管理、独立 `square/` 目录、图片移动归档和更完整的标签编辑。
 
-> V2.1.0 已通过本地与远程隔离验收（完整测试 `79 passed`）。Docker Hub `qinlingmonkey/random-image-api:v2` 在本次发布完成前仍对应 V2.0.0（`linux/amd64`，摘要 `sha256:22097fbcb95a953c99a4c32a4c0381bfdc817bc25e6e2825272694a1d9d126cb`）；发布完成后同一 `v2` 标签将更新为 V2.1.0，`v1` 继续保留。
+> V2.1.0 已通过本地与远程隔离验收（完整测试 `79 passed`），并已发布到 GitHub `main` 和 Docker Hub `qinlingmonkey/random-image-api:v2`。当前镜像为 `linux/amd64`，Registry 摘要为 `sha256:d35f9c129d3c2119552b2b18877201125b224c4f918b0caee66ba1692d987a0e`；`v1` 继续保留用于旧部署与回滚。
 
 ## 1. 数据边界
 

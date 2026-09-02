@@ -2,7 +2,7 @@
 
 Random Image API V2 是 V1 的**向后兼容扩展**：保留 V1 的 `GET /random`、`?type=`、本地图库、WebDAV Hybrid、默认 90% 远程优先、缓存、归档 importer、Backup / Restore，并新增主题标签和安全管理 UI。V2.1 在不改变 API 和数据库 schema 的前提下，重点优化管理网页与本地图片整理体验。
 
-> 当前发布状态：V2.1.0 已通过本地和远程隔离验收，完整测试为 `79 passed`。Docker Hub 的 `qinlingmonkey/random-image-api:v2` 在本次发布完成前仍指向已发布的 V2.0.0（`linux/amd64`，摘要 `sha256:22097fbcb95a953c99a4c32a4c0381bfdc817bc25e6e2825272694a1d9d126cb`）；完成 GitHub 同步和 Registry 发布后将由 V2.1.0 更新同一 `v2` 标签。`qinlingmonkey/random-image-api:v1` 继续保留用于旧部署与回滚。
+> 当前发布状态：V2.1.0 已通过本地和远程隔离验收，完整测试为 `79 passed`。GitHub `main` 已包含提交 `d637c4b6d8f444516a6084e571748a9ba3c692e1`；Docker Hub `qinlingmonkey/random-image-api:v2` 已更新为 V2.1.0（`linux/amd64`，Registry 摘要 `sha256:d35f9c129d3c2119552b2b18877201125b224c4f918b0caee66ba1692d987a0e`）。`qinlingmonkey/random-image-api:v1` 继续保留用于旧部署与回滚。
 
 V1 快照见 [docs/V1.md](docs/V1.md)，V1 原地升级和 VPS 迁移见 [MIGRATION.md](MIGRATION.md)。
 

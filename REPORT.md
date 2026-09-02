@@ -4,7 +4,7 @@
 
 本报告记录 Random Image API V2.1 文档与当前本地实现的状态。V2.1 保留 V1/V2 API、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、tags 和主题接口，重点优化管理 UI、图片预览、物理目录整理与标签编辑。
 
-V2.1.0 已通过本地与远程隔离验收，最终完整测试为 `79 passed`。在本次发布完成前，Docker Hub `qinlingmonkey/random-image-api:v2` 仍指向已发布的 V2.0.0（Registry 摘要 `sha256:22097fbcb95a953c99a4c32a4c0381bfdc817bc25e6e2825272694a1d9d126cb`）；`v1` 继续保留。GitHub 与 Docker Hub 的最终发布结果将在完成实际推送和 Registry 回读后补充。
+V2.1.0 已通过本地与远程隔离验收，最终完整测试为 `79 passed`。功能提交 `d637c4b6d8f444516a6084e571748a9ba3c692e1` 已推送至 GitHub `main`；Docker Hub `qinlingmonkey/random-image-api:v2` 已更新为 V2.1.0。发布后 Registry 回读确认镜像为 `linux/amd64`，摘要为 `sha256:d35f9c129d3c2119552b2b18877201125b224c4f918b0caee66ba1692d987a0e`；`v1` 继续保留。
 
 ## 2. 信息来源与调研说明
 
