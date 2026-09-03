@@ -4,7 +4,7 @@
 
 本报告记录 Random Image API V2.2 文档与当前本地实现的状态。V2.2 保留 V1/V2 API、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、tags 和主题接口，重点优化管理 UI、图片预览、物理目录整理与标签编辑。
 
-V2.2.0 候选版本的本地完整测试为 `81 passed`。GitHub、Docker Hub 镜像 digest 与平台信息将在本轮发布完成后补录；`v1` 继续保留用于旧部署与回滚。
+V2.2.0 的本地与远程候选镜像完整测试均为 `81 passed`。源码已发布至 GitHub `main`，Docker Hub 镜像 `qinlingmonkey/random-image-api:v2` 已发布为 `linux/amd64`；Registry 摘要为 `sha256:268860bd1cb046f9a7f9f34dfc6ec6396e5748993f67d91cd202032f2189e490`，`v1` 继续保留用于旧部署与回滚。
 
 ## 2. 信息来源与调研说明
 
@@ -198,15 +198,17 @@ V2.2 新增或完善：
 
 GitHub `main` 已同步 V2 源码提交 `304d5ff48dd6f82904066dd54aa436d651a997d5`。同一远程验收镜像已发布为 `qinlingmonkey/random-image-api:v2`；发布后通过 Docker Registry API 独立回读 manifest 和配置 Blob，确认摘要为 `sha256:22097fbcb95a953c99a4c32a4c0381bfdc817bc25e6e2825272694a1d9d126cb`、配置摘要为 `sha256:911fd314b95b6227a24f2100246d63cf0d1cdb29a7e46128fdab3a8c61e73357`、平台为 `linux/amd64`、共 10 层。
 
-## 7. 本轮发布阻塞与实际结果
+## 7. 本轮发布与实际结果
 
 - 本地最终 `pytest -q`：`81 passed`，退出码 `0`；`compileall`、Shell 语法和 `git diff --check` 均通过。
 - 远程隔离 Compose 构建、healthy、SQLite、UID 1000、HTTP、登录/CSRF、上传、UI HTML 合同、Backup/Restore 均通过。
-- 本轮远程无法使用浏览器访问隔离端口，因此未执行视觉验收。
-- 本地未配置可安全使用的 GitHub 凭据、Docker Hub 凭据或 Docker daemon；因此未推送 GitHub、未推送 Docker Hub，也未能回读新的 Registry digest。
-- 代码与文档已更新为 V2.2.0 候选状态；推送和 digest 待具备安全凭据与构建环境后补录。
+- 本轮远程无法使用浏览器访问隔离端口，因此未执行远程视觉验收；使用真实 HTTP 管理流程和 HTML 合同检查替代，未伪造截图结论。
+- GitHub `main` 已同步 V2.2 功能与验收提交 `384a155290c69dbd65dda08d2d374dccc2f2a7e7`。
+- 使用该提交的 Git 归档在测试 VPS 独立目录构建最终 `linux/amd64` 镜像，应用版本标签为 `2.2.0`，源码修订标签为 `384a155290c69dbd65dda08d2d374dccc2f2a7e7`。
+- `qinlingmonkey/random-image-api:v2` 已推送成功；Docker Registry API 独立回读确认 manifest 摘要为 `sha256:268860bd1cb046f9a7f9f34dfc6ec6396e5748993f67d91cd202032f2189e490`、config 摘要为 `sha256:faa555405f7b82bd824ee741791fbd8adfa3823b47b5289bddc825483e2cdd32`、平台为 `linux/amd64`、共 12 层。
+- 发布使用独立远程目录、专用镜像标签和临时 Docker 配置；清理后不保留 Docker Hub 登录配置、构建目录或候选镜像，服务器原有业务容器未被停止、重启或修改。
 
-## 7. 已解决问题
+## 8. 已解决问题
 
 - 在不破坏 V1 `/random` 的前提下增加主题随机接口；
 - 以多对多关系支持一图多主题；
@@ -221,7 +223,7 @@ GitHub `main` 已同步 V2 源码提交 `304d5ff48dd6f82904066dd54aa436d651a997d
 - 网页上传完成后主题索引无需等待定时扫描即可立即使用；
 - 远程 Compose、非 Root、持久化、管理 UI、归档导入及 Backup / Restore 已完成隔离验收。
 
-## 8. 未解决问题与已知风险
+## 9. 未解决问题与已知风险
 
 - 当前 `v2` 仅发布 `linux/amd64`；ARM64 主机需要自行从源码构建，或等待后续多架构镜像。
 - 管理会话与待确认 preview 存于单进程内存；容器重启会退出登录并使 preview 失效。这符合当前单实例设计，但不适用于多副本共享会话。
@@ -231,7 +233,7 @@ GitHub `main` 已同步 V2 源码提交 `304d5ff48dd6f82904066dd54aa436d651a997d
 - WebDAV 第一层目录必须能转换为合法 slug；更深层目录不形成层级主题。
 - 文件系统与 SQLite 无法形成真正的跨资源原子事务；实现通过预校验、原子落位和失败补偿降低风险，极端掉电窗口仍可能需要下一次 scan 修复状态。
 
-## 9. 后续建议
+## 10. 后续建议
 
 1. 保留 V1 镜像与 `docs/V1.md`，为回滚和旧部署维护提供基线。
 2. 后续评估构建 `linux/arm64` 多架构镜像；发布前不要把当前 `v2` 描述为多架构。

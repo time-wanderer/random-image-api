@@ -4,11 +4,13 @@ Random Image API V2 是 V1 的向后兼容扩展，增加 tags、多对多主题
 
 ## 发布状态（请先阅读）
 
-- **当前候选版本**：V2.2.0；Docker Hub Registry 信息将在本轮发布完成后补录
+- **当前版本**：V2.2.0
+- **镜像**：`qinlingmonkey/random-image-api:v2`
 - **验收状态**：本地与远程隔离验收通过，完整测试为 `81 passed`
 - **平台**：`linux/amd64`
-- **Registry 摘要**：待本轮镜像推送后补录
-- **对应 GitHub 功能提交**：待本轮 Git commit 创建后补录
+- **Registry 摘要**：`sha256:268860bd1cb046f9a7f9f34dfc6ec6396e5748993f67d91cd202032f2189e490`
+- **Config 摘要**：`sha256:faa555405f7b82bd824ee741791fbd8adfa3823b47b5289bddc825483e2cdd32`
+- **对应 GitHub 提交**：`384a155290c69dbd65dda08d2d374dccc2f2a7e7`
 - **兼容回滚版本**：`qinlingmonkey/random-image-api:v1`，继续保留且不会被 V2 覆盖
 
 V2 是 V1 的扩展：旧的 `/random`、`?type=`、本地图库和 WebDAV Hybrid 部署可以继续使用；升级前仍应先备份 SQLite 与永久图片。
