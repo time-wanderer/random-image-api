@@ -17,6 +17,7 @@ import io
 import os
 import re
 import secrets
+import sqlite3
 import tarfile
 import time
 import zipfile
@@ -61,21 +62,185 @@ def _escape(value: object) -> str:
     return html.escape(str(value), quote=True)
 
 
-def _page(title: str, body: str, csrf: str | None = None) -> HTMLResponse:
+def _page(title: str, body: str, csrf: str | None = None, nav: str = "") -> HTMLResponse:
     token = "" if csrf is None else f'<meta name="csrf-token" content="{_escape(csrf)}">'
     style = """<style>
-:root{color-scheme:light;--bg:#f4f7fb;--card:#fff;--text:#172033;--muted:#667085;--line:#dbe2ea;--primary:#2563eb;--danger:#b42318;--ok:#067647}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,sans-serif}header,main{width:min(1180px,calc(100% - 28px));margin:auto}header{padding:24px 0 12px}h1,h2,h3{line-height:1.2}nav{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 20px}nav a,.button,button{border:0;border-radius:8px;padding:9px 13px;background:var(--primary);color:#fff;text-decoration:none;cursor:pointer}button.danger{background:var(--danger)}button.secondary,.button.secondary{background:#475467}.panel,.card,.stat{background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:0 1px 2px #1018280d}.panel{padding:18px;margin:16px 0}.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}.stat{padding:16px}.stat strong{display:block;font-size:1.7rem}.grid{columns:4 230px;column-gap:14px}.card{display:inline-block;width:100%;overflow:hidden;margin:0 0 14px;break-inside:avoid}.card img,.placeholder{width:100%;height:190px;display:block;object-fit:cover;background:#e9eef5}.placeholder{display:grid;place-items:center;color:var(--muted)}.card-body{padding:13px}.actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}.actions form{margin:0}.badge{display:inline-block;border-radius:999px;padding:3px 8px;margin:2px;background:#eef2f6;color:#344054;font-size:.82rem}.badge.ok{background:#ecfdf3;color:var(--ok)}.badge.off{background:#fef3f2;color:var(--danger)}form.filters,.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;align-items:end}label{display:block;font-weight:600}input,select{width:100%;padding:9px;border:1px solid #cbd5e1;border-radius:7px;background:#fff}input[type=checkbox]{width:auto}.check{font-weight:400;display:inline-flex;gap:6px;align-items:center}.muted{color:var(--muted);overflow-wrap:anywhere}.message{padding:10px;border-radius:8px;background:#eff6ff}.pager{justify-content:center}@media(max-width:640px){header,main{width:min(100% - 18px,1180px)}.grid{columns:1}.card img,.placeholder{height:230px}nav a{flex:1;text-align:center}.actions button{width:100%}}
-</style>"""
-    return HTMLResponse(
-        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
-        f"<meta name=\"viewport\" content=\"width=device-width\">{token}"
-        f"<title>{_escape(title)}</title>{style}</head><body><header><h1>{_escape(title)}</h1></header><main>{body}</main></body></html>"
-    )
+:root {
+  color-scheme: light;
+  --bg: #eef3f8;
+  --surface: #fff;
+  --surface-soft: #f7f9fc;
+  --text: #172033;
+  --muted: #667085;
+  --line: #d9e2ec;
+  --primary: #2563eb;
+  --primary-dark: #1d4ed8;
+  --danger: #b42318;
+  --ok: #067647;
+  --warning: #b54708;
+  --shadow: 0 8px 24px #17203312;
+}
+* { box-sizing: border-box; }
+html, body { overflow-x: hidden; }
+body { margin: 0; background: linear-gradient(180deg, #e9f0f8 0, #f7f9fc 280px); color: var(--text); font: 15px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+header, main { width: min(1180px, calc(100% - 32px)); margin: auto; }
+header { padding: 24px 0 0; }
+.appbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.brand-mark { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 12px; background: var(--primary); color: #fff; font-weight: 800; font-size: 20px; }
+.brand h1 { margin: 0; font-size: 1.35rem; }
+.version, .muted, .stat small, .path { color: var(--muted); }
+.user-actions, .actions, .card-action-group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.user-actions form, .actions form { margin: 0; }
+nav.main-nav { display: flex; flex-wrap: wrap; gap: 8px; margin: 22px 0; min-width: 0; }
+nav.main-nav a { border: 1px solid transparent; border-radius: 9px; padding: 9px 14px; color: #344054; text-decoration: none; font-weight: 650; white-space: nowrap; }
+nav.main-nav a:hover, nav.main-nav a.active { background: var(--surface); border-color: var(--line); box-shadow: 0 2px 7px #1720330d; color: var(--primary); }
+main { padding-bottom: 48px; }
+h1, h2, h3 { line-height: 1.2; }
+h2 { margin: 0 0 8px; }
+h3 { margin: 0 0 6px; }
+.eyebrow { margin: 0 0 7px; color: var(--primary); font-size: .78rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.lead { font-size: 1.05rem; }
+.panel, .card, .stat, .step { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); }
+.panel { padding: 20px; margin: 16px 0; }
+.hero { padding: 28px; background: linear-gradient(135deg, #fff 0, #eff6ff 100%); }
+.section-heading, .result-toolbar { display: flex; justify-content: space-between; align-items: end; gap: 16px; margin: 28px 0 12px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(0, 1fr)); gap: 12px; min-width: 0; }
+.stat { padding: 16px; }
+.stat strong { display: block; font-size: 1.8rem; }
+.steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.step { padding: 18px; min-width: 0; overflow-wrap: anywhere; }
+.step-number { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: #dbeafe; color: var(--primary); font-weight: 800; }
+.management-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.management-grid .panel { margin: 0; min-width: 0; }
+.button, button { display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 9px; padding: 10px 14px; background: var(--primary); color: #fff; text-decoration: none; cursor: pointer; font: inherit; font-weight: 650; }
+button:hover, .button:hover { background: var(--primary-dark); }
+button:disabled, .button[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
+button.secondary, .button.secondary { background: #475467; }
+button.danger { background: var(--danger); }
+button.warning { background: var(--warning); }
+button.link { background: transparent; color: var(--primary); padding: 4px 0; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 3px solid #93c5fd; outline-offset: 3px; }
+form { margin: 0; }
+form.filters, .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; align-items: end; }
+.toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-soft); }
+.toolbar h3 { margin: 0; }
+.file-picker { display: grid; gap: 7px; padding: 12px; border: 1px dashed #9bb5d1; border-radius: 10px; background: var(--surface-soft); }
+.help-text { color: var(--muted); font-size: .84rem; }
+label { display: block; font-weight: 650; }
+label span.label-note { display: block; color: var(--muted); font-size: .82rem; font-weight: 400; }
+input, select { width: 100%; min-width: 0; padding: 10px; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; color: var(--text); font: inherit; }
+input[type=file] { padding: 8px; background: var(--surface-soft); }
+input[type=checkbox] { width: auto; }
+.check { display: inline-flex; gap: 6px; align-items: center; font-weight: 400; }
+.actions form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-width: 0; }
+.actions select { width: auto; max-width: 100%; }
+.message, .alert { padding: 12px 14px; border-radius: 10px; background: #eff6ff; border: 1px solid #bfdbfe; }
+.alert.success { background: #ecfdf3; border-color: #a7f3d0; color: var(--ok); }
+.alert.error { background: #fef3f2; border-color: #fecdca; color: var(--danger); }
+.card-body { padding: 14px; overflow-wrap: anywhere; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; align-items: start; min-width: 0; }
+.card { min-width: 0; overflow: hidden; }
+.preview-frame { position: relative; display: grid; place-items: center; width: 100%; aspect-ratio: 4 / 3; background: #e9eef5; overflow: hidden; }
+.card img, .preview-frame .placeholder { display: block; width: 100%; height: 100%; object-fit: contain; background: #e9eef5; }
+.placeholder { display: grid; place-items: center; color: var(--muted); }
+.preview-overlay { position: absolute; inset: 10px 10px auto; display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; pointer-events: none; }
+.preview-overlay .badge { margin: 0; box-shadow: 0 1px 4px #17203326; }
+.path { color: var(--muted); font-size: .82rem; overflow-wrap: anywhere; word-break: break-word; }
+.tags { margin: 10px 0; }
+.tags-label { display: block; margin-bottom: 4px; font-weight: 750; }
+.badge { display: inline-block; margin: 2px; padding: 4px 10px; border-radius: 999px; background: #e0e7ff; color: #273b8f; font-size: .82rem; font-weight: 700; }
+.badge.ok { background: #ecfdf3; color: var(--ok); }
+.badge.off { background: #fef3f2; color: var(--danger); }
+.card-meta { display: flex; flex-wrap: wrap; gap: 2px; }
+.manage-entry { width: 100%; margin-top: 12px; }
+.card-action-group { align-items: stretch; margin-top: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-soft); }
+.card-action-group details { flex: 1 1 100%; min-width: 0; }
+.card-action-group summary { cursor: pointer; color: var(--primary); font-weight: 750; }
+.card-action-group.danger-zone { border-color: #fecdca; background: #fff8f7; }
+.card-action-group.danger-zone summary { color: var(--danger); }
+.table-wrap { overflow-x: auto; }
+.tag-table { width: 100%; border-collapse: collapse; }
+.tag-table th, .tag-table td { padding: 12px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.tag-table th { color: var(--muted); font-size: .82rem; }
+.danger-zone { border-color: #fecdca; background: #fff8f7; }
+.filter-group { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-soft); }
+.filter-group h3 { font-size: 1rem; }
+.clear-filter { color: var(--muted); font-weight: 650; text-decoration: none; }
+.card-action-group { align-items: stretch; margin-top: 12px; }
+.card-action-group details { flex: 1 1 100%; min-width: 0; }
+.card-action-group summary { cursor: pointer; color: var(--primary); font-weight: 700; }
+.pager { display: flex; justify-content: center; gap: 12px; margin: 20px 0; }
+.pager a { color: var(--primary); font-weight: 650; }
+.empty-state { text-align: center; padding: 34px 18px; }
+.empty-icon { font-size: 2rem; }
+.form-error { grid-column: 1 / -1; }
+.tag-color-0{background:#e0f2fe;color:#075985}.tag-color-1{background:#ede9fe;color:#5b21b6}.tag-color-2{background:#fce7f3;color:#9d174d}.tag-color-3{background:#dcfce7;color:#166534}.tag-color-4{background:#fef3c7;color:#92400e}.tag-color-5{background:#ffedd5;color:#9a3412}.tag-color-6{background:#cffafe;color:#155e75}.tag-color-7{background:#f3e8ff;color:#7e22ce}.tag-color-8{background:#dbeafe;color:#1e40af}.tag-color-9{background:#ccfbf1;color:#115e59}.tag-color-10{background:#fee2e2;color:#991b1b}.tag-color-11{background:#f1f5f9;color:#334155}
+.preview-frame img{cursor:zoom-in}.floating-toolbar{position:sticky;top:8px;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:12px;margin:12px 0;padding:12px 16px;background:#172033f2;color:#fff;border-radius:12px;box-shadow:0 8px 24px #17203340}.floating-toolbar[hidden]{display:none}.drawer,.lightbox{position:fixed;inset:0;z-index:20;background:#17203399;display:flex;justify-content:flex-end}.drawer[hidden],.lightbox[hidden]{display:none}.drawer-panel{width:min(520px,100%);height:100%;overflow:auto;padding:24px;background:#fff;box-shadow:-8px 0 28px #17203340}.lightbox{align-items:center;justify-content:center;padding:18px}.lightbox img{max-width:96vw;max-height:90vh;width:auto;height:auto;object-fit:contain}.dialog-close{float:right;background:#475467}.detail-grid{display:grid;grid-template-columns:max-content 1fr;gap:8px 16px}.detail-grid dt{font-weight:700;color:var(--muted)}
+@media(max-width:760px){
+  header, main { width: min(100% - 18px, 1180px); }
+  .appbar { display: block; }
+  .brand { align-items: flex-start; }
+  .brand > div { min-width: 0; }
+  .brand h1, .version { overflow-wrap: anywhere; }
+  .user-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; min-width: 0; }
+  .user-actions form { justify-self: end; }
+  .user-actions form button { white-space: nowrap; }
+  .stats, .steps, .management-grid, .workspace-grid, form.filters, .form-grid { grid-template-columns: 1fr; min-width: 0; }
+  .stats,.steps,.workspace-grid,form.filters,.form-grid{grid-template-columns:1fr;min-width:0}
+  nav.main-nav a{white-space:nowrap}
+  nav.main-nav a{word-break:keep-all}
+  nav.main-nav{overflow-x:auto}
+  nav.main-nav{flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden}
+  html,body{overflow-x:hidden}
+  .grid { grid-template-columns: 1fr; min-width: 0; }
+  .card, .card-body, .card-action-group, .result-toolbar, .toolbar { min-width: 0; }
+  .section-heading, .result-toolbar, .toolbar { align-items: flex-start; flex-direction: column; }
+  .result-toolbar strong { align-self: stretch; }
+  .card-action-group .actions, .card-action-group .actions form { width: 100%; min-width: 0; }
+  .card-action-group .actions form > * { max-width: 100%; }
+  code, .path { overflow-wrap: anywhere; word-break: break-word; }
+  .actions form, .actions button, .actions .button, .card-action-group button, .card-action-group select { width: 100%; }
+  .actions form select, .actions form input:not([type=hidden]) { width: 100%; min-width: 0; }
+  nav.main-nav { flex-wrap: nowrap; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; margin: 12px 0; min-width: 0; padding-bottom: 2px; }
+  nav.main-nav a { flex: 0 0 auto; text-align: center; white-space: nowrap; }
+  .tag-table { min-width: 680px; }
+}
+@media(max-width:390px){
+  header, main { width: calc(100% - 18px); }
+  .grid { grid-template-columns: 1fr; }
+  .card-action-group { padding: 8px; }
+  .card-action-group .actions form { display: grid; grid-template-columns: 1fr; }
+  .card-action-group .actions form > * { width: 100%; min-width: 0; }
+  .result-toolbar strong { width: 100%; }
+}
+</style><script>(function(){document.addEventListener('DOMContentLoaded',function(){
+function closeLayer(layer){if(!layer)return;layer.hidden=true;document.body.style.overflow='';if(layer._opener)layer._opener.focus();}
+document.addEventListener('submit',function(e){var f=e.target;if(!f.matches('form'))return;var sel=f.querySelector('select[name="tag_id"]');if(sel&&sel.required&&!sel.value){e.preventDefault();var h=f.querySelector('.form-error')||document.createElement('p');h.className='alert error form-error';h.setAttribute('role','alert');h.textContent='请先选择一个标签，再提交此操作。';if(!h.parentNode)f.prepend(h);sel.focus();return;}var btn=f.querySelector('button[type="submit"],button:not([type])');if(btn){btn.disabled=true;btn.dataset.originalText=btn.textContent;btn.textContent='处理中…';}});
+function refreshBatchSelection(){var count=document.querySelectorAll('[data-batch-image]:checked').length;var h=document.getElementById('batch-count');var bar=document.querySelector('[data-batch-toolbar]');if(h)h.textContent=count?'已选择 '+count+' 张图片':'请选择图片';if(bar)bar.hidden=!count;return count;}document.addEventListener('change',function(e){if(e.target.matches('[data-batch-image]'))refreshBatchSelection();if(e.target.matches('[data-drop-input]')){var z=e.target.closest('[data-drop-zone]'),h=z&&z.querySelector('[data-file-summary]');if(h)h.textContent=e.target.files.length+' 个文件：'+Array.from(e.target.files).map(function(x){return x.name;}).join('、');}});
+document.addEventListener('click',function(e){var layer=e.target.closest('.lightbox,.drawer');if(layer&&e.target===layer){closeLayer(layer);return;}var batch=e.target.closest('[data-batch-select]');if(batch){e.preventDefault();var checked=batch.dataset.batchSelect==='all';document.querySelectorAll('[data-batch-image]').forEach(function(x){x.checked=checked;});refreshBatchSelection();return;}var c=e.target.closest('[data-close-layer]');if(c){e.preventDefault();closeLayer(document.getElementById(c.dataset.closeLayer));return;}var l=e.target.closest('[data-lightbox-src]');if(l){e.preventDefault();var b=document.getElementById('image-lightbox');b.querySelector('img').src=l.dataset.lightboxSrc;b.querySelector('img').alt=l.dataset.lightboxAlt||'';b._opener=l;b.hidden=false;document.body.style.overflow='hidden';return;}var d=e.target.closest('[data-detail-url]');if(d){e.preventDefault();var x=document.getElementById('image-detail-drawer');x.querySelector('.drawer-content').innerHTML='<p class="muted">正在加载…</p>';x._opener=d;x.hidden=false;document.body.style.overflow='hidden';fetch(d.dataset.detailUrl,{credentials:'same-origin'}).then(function(r){if(!r.ok)throw Error();return r.text();}).then(function(t){x.querySelector('.drawer-content').innerHTML=t;}).catch(function(){x.querySelector('.drawer-content').innerHTML='<p class="alert error" role="alert">详情加载失败，请重试。</p>';});}});
+document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeLayer(document.getElementById('image-lightbox'));closeLayer(document.getElementById('image-detail-drawer'));}});
+var initialBatch=document.querySelector('[data-batch-toolbar]');if(initialBatch)initialBatch.hidden=true;var z=document.querySelector('[data-drop-zone]'),i=document.querySelector('[data-drop-input]');if(z&&i){['dragenter','dragover'].forEach(function(n){z.addEventListener(n,function(e){e.preventDefault();z.classList.add('is-dragging');});});['dragleave','drop'].forEach(function(n){z.addEventListener(n,function(e){e.preventDefault();z.classList.remove('is-dragging');});});z.addEventListener('drop',function(e){if(e.dataTransfer.files.length){i.files=e.dataTransfer.files;i.dispatchEvent(new Event('change',{bubbles:true}));}});}
+});})();</script>"""
+    return HTMLResponse("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"+f"{token}<title>{_escape(title)}</title>{style}</head><body><header><div class=\"appbar\"><div class=\"brand\"><span class=\"brand-mark\" aria-hidden=\"true\">R</span><div><h1>{_escape(title)}</h1><span class=\"version\">Random Image API · 管理端 · V2</span></div></div><div class=\"user-actions\">{nav}</div></div></header><main>{body}</main></body></html>")
 
 
-def _redirect(path: str, message: str | None = None) -> RedirectResponse:
+def _error_page(title: str, message: str, status_code: int = 400) -> HTMLResponse:
+    """Render expected administrator/input failures without exposing internals."""
+    page = _page(title, f'<p class="alert error" role="alert">{_escape(message)}</p>'
+                 '<p><a class="button" href="javascript:history.back()">返回上一页</a></p>', None)
+    page.status_code = status_code
+    return page
+
+
+def _redirect(path: str, message: str | None = None, error: str | None = None) -> RedirectResponse:
     separator = "&" if "?" in path else "?"
-    target = path if not message else f"{path}{separator}message={quote(message)}"
+    query = []
+    if message:
+        query.append(("message", message))
+    if error:
+        query.append(("error", error))
+    target = path if not query else f"{path}{separator}{urlencode(query)}"
     return RedirectResponse(target, status_code=303)
 
 
@@ -185,6 +350,26 @@ def _safe_db_file(root_value: Path | str, stored_name: str) -> Path:
     if not resolved.is_file():
         raise HTTPException(404, "file unavailable")
     return resolved
+
+
+def _tag_color_class(slug: str) -> str:
+    """Return a stable finite CSS class; user input never becomes CSS."""
+    digest = hashlib.sha256(slug.strip().lower().encode("utf-8", "replace")).hexdigest()
+    return f"tag-color-{int(digest[:8], 16) % 12}"
+
+
+_SORT_COLUMNS = {
+    "added_at": "i.updated_at",
+    "filename": "i.rel_path",
+    "direction": "i.orientation",
+    "source": "i.source",
+}
+_WEBDAV_SORT_COLUMNS = {
+    "added_at": "o.updated_at",
+    "filename": "o.href",
+    "direction": "o.orientation",
+    "source": "o.href",
+}
 
 
 def _storage_group(rel_path: str) -> str:
@@ -352,16 +537,29 @@ def create_admin_router(settings: Any) -> APIRouter:
     def hidden(csrf: str) -> str:
         return f'<input type="hidden" name="csrf" value="{_escape(csrf)}">'
 
+    def page_nav(active: str, csrf: str | None = None) -> str:
+        links = (("overview", "总览", admin_path), ("images", "图片库", f"{admin_path}/images"), ("tags", "标签工作台", f"{admin_path}/tags"))
+        items = "".join(
+            f'<a class="{"active" if key == active else ""}" href="{_escape(url)}">{_escape(label)}</a>'
+            for key, label, url in links
+        )
+        logout = ""
+        if csrf is not None:
+            logout = f'<form method="post" action="{_escape(admin_path)}/logout" onsubmit="return confirm(\'确定退出管理端？\')">{hidden(csrf)}<button class="secondary">退出</button></form>'
+        return f'<nav class="main-nav" aria-label="主导航">{items}</nav>{logout}'
+
     def tag_inputs(rows: list[Any]) -> str:
-        options = '<option value="">无</option>' + "".join(
+        if not rows:
+            return '<p class="muted">当前还没有标签，请先创建标签。<a class="button" href="' + _escape(admin_path) + '/tags">创建第一个标签</a></p>'
+        options = '<option value="">不添加标签（可选）</option>' + "".join(
             f'<option value="{_escape(row["slug"])}">{_escape(row["slug"])} — {_escape(row["display_name"])}</option>'
             for row in rows
         )
         checks = "".join(
-            f'<label><input type="checkbox" name="tags" value="{_escape(row["slug"])}"> {_escape(row["slug"])}</label> '
+            f'<label><input type="checkbox" name="tags" value="{_escape(row["slug"])}"> {_escape(row["display_name"])} — {_escape(row["slug"])}</label> '
             for row in rows
         )
-        return f'<label>默认标签 <select name="default_tag">{options}</select></label><fieldset><legend>附加标签</legend>{checks}</fieldset>'
+        return f'<p class="muted">上传后添加标签（可选）；不选择表示不添加标签。</p><label>上传后添加标签（可选） <select name="default_tag">{options}</select></label><fieldset><legend>附加标签（可选）</legend>{checks}</fieldset>'
 
     @router.get("/login", response_class=HTMLResponse)
     def login_page() -> HTMLResponse:
@@ -415,24 +613,67 @@ def create_admin_router(settings: Any) -> APIRouter:
             remote, remote_enabled = conn.execute("SELECT COUNT(*),COALESCE(SUM(enabled),0) FROM webdav_objects").fetchone()
             cached = int(conn.execute("SELECT COUNT(*) FROM webdav_cache").fetchone()[0])
             tags = int(conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0])
-            tag_rows = conn.execute("SELECT slug,display_name FROM tags ORDER BY slug").fetchall()
+            tag_rows = conn.execute("SELECT slug,display_name FROM tags WHERE enabled=1 ORDER BY slug").fetchall()
         message = _escape(request.query_params.get("message", ""))
+        error = _escape(request.query_params.get("error", ""))
+        notices = ((f'<p class="alert success" role="status">{message}</p>' if message else "") +
+                   (f'<p class="alert error" role="alert">{error}</p>' if error else ""))
         body = (
-            f'<p class="message">{message or "管理本地图库、WebDAV 索引、标签和导入任务。"}</p>'
-            f'<section class="stats"><article class="stat"><span>本地图片</span><strong>{int(local)}</strong><small>启用 {int(local_enabled)}</small></article>'
-            f'<article class="stat"><span>WebDAV</span><strong>{int(remote)}</strong><small>启用 {int(remote_enabled)}</small></article>'
-            f'<article class="stat"><span>WebDAV 缓存</span><strong>{cached}</strong><small>只展示已缓存预览</small></article>'
-            f'<article class="stat"><span>主题标签</span><strong>{tags}</strong><small>支持一图多标签</small></article></section>'
-            f'<nav><a href="{admin_path}/images?source=local">本地图片</a> '
-            f'<a href="{admin_path}/images?source=webdav">WebDAV 图片</a> <a href="{admin_path}/tags">标签</a></nav>'
-            f'<h2>上传图片</h2><form method="post" action="{admin_path}/upload" enctype="multipart/form-data">{hidden(session.csrf)}'
-            f'{tag_inputs(tag_rows)}<input type="file" name="files" accept="image/jpeg,image/png,image/webp" multiple required><button>上传</button></form>'
-            f'<h2>归档预览</h2><form method="post" action="{admin_path}/archives/preview" enctype="multipart/form-data">{hidden(session.csrf)}'
-            f'<input type="file" name="archive" accept=".zip,.tar.gz,.tgz" required><button>预览归档</button></form>'
-            f'<form method="post" action="{admin_path}/cache/clear">{hidden(session.csrf)}<button>清理全部 WebDAV 缓存</button></form>'
-            f'<form method="post" action="{admin_path}/logout">{hidden(session.csrf)}<button>退出</button></form>'
+            notices + f'<section class="panel hero"><p class="eyebrow">图库管理 · 快速开始</p><h2>把图片变成可调用的主题 API</h2>'
+            '<p class="lead">先创建标签，再上传或导入图片，最后在图片库检查标签并使用主题接口。</p></section>'
+            '<section class="section-heading"><div><p class="eyebrow">上手路径</p><h2>开始使用</h2></div></section>'
+            '<section class="steps">'
+            f'<article class="step"><span class="step-number">1</span><h3>创建标签</h3><p class="muted">用显示名称给人看，用唯一 slug 供 API 稳定调用。</p><a class="button" href="{_escape(admin_path)}/tags">创建标签</a></article>'
+            '<article class="step"><span class="step-number">2</span><h3>上传 / 导入</h3><p class="muted">上传单张或多张图片，也可以先预览 ZIP / TAR 归档。</p><a class="button secondary" href="#upload">选择文件</a></article>'
+            f'<article class="step"><span class="step-number">3</span><h3>浏览并调用 API</h3><p class="muted">在图片库确认真实方向和标签，再将 slug 用于主题 API。</p><div class="actions"><a class="button secondary" href="{_escape(admin_path)}/images?source=local">浏览本地图片</a><a class="button secondary" href="{_escape(admin_path)}/images?source=webdav">浏览 WebDAV</a></div></article>'
+            '</section>'
+            '<div class="section-heading"><div><p class="eyebrow">服务状态</p><h2>当前统计</h2></div></div>'
+            f'<section class="stats"><article class="stat"><span>本地图片</span><strong>{int(local)}</strong><small>已启用 {int(local_enabled)}</small></article>'
+            f'<article class="stat"><span>WebDAV 图片</span><strong>{int(remote)}</strong><small>已启用 {int(remote_enabled)}</small></article>'
+            f'<article class="stat"><span>WebDAV 缓存</span><strong>{cached}</strong><small>仅展示已缓存预览</small></article>'
+            f'<article class="stat"><span>主题标签</span><strong>{tags}</strong><small>可用于主题 API</small></article></section>'
+            '<div class="section-heading"><div><p class="eyebrow">管理操作</p><h2>导入与维护</h2></div></div>'
+            '<section class="management-grid">'
+            f'<section class="panel" id="upload"><h3>上传图片</h3><p class="muted">支持 JPG、JPEG、PNG、WebP；可多选。标签为空时，图片仍可先上传，之后在图片库补充。</p>'
+            f'<form method="post" action="{_escape(admin_path)}/upload" enctype="multipart/form-data">{hidden(session.csrf)}{tag_inputs(tag_rows)}<label class="file-picker" data-drop-zone="1">选择图片<span class="help-text" data-file-summary>拖拽文件到此处，或点击选择；无 JS 时仍可普通上传</span><input data-drop-input="1" type="file" name="files" accept="image/jpeg,image/png,image/webp" multiple required></label><button type="submit">上传图片</button></form></section>'
+            f'<section class="panel"><h3>归档导入</h3><p class="muted">先预览内容和目录标签，确认后才会写入；不会自动下载 WebDAV 图片。</p><form method="post" action="{_escape(admin_path)}/archives/preview" enctype="multipart/form-data">{hidden(session.csrf)}<label class="file-picker">选择 ZIP / TAR 归档<span class="help-text">支持 ZIP、TAR.GZ、TGZ；先预览，确认后导入</span><input type="file" name="archive" accept=".zip,.tar.gz,.tgz" required></label><button>预览归档</button></form></section>'
+            f'<section class="panel"><h3>WebDAV 与缓存</h3><p class="muted">WebDAV 只管理已索引对象；预览仅使用已有缓存。</p><div class="actions"><a class="button secondary" href="{_escape(admin_path)}/images?source=webdav">管理 WebDAV 图片</a>'
+            f'<form method="post" action="{_escape(admin_path)}/cache/clear" onsubmit="return confirm(\'确定清理全部 WebDAV 缓存？\')">{hidden(session.csrf)}<button class="warning">清理 WebDAV 缓存</button></form></div></section>'
+            '</section>'
         )
-        return _page("管理总览", body, session.csrf)
+        return _page("管理总览", body, session.csrf, page_nav("overview", session.csrf))
+
+    @router.get("/images/{image_id}/detail", response_class=HTMLResponse)
+    def local_detail(image_id: int, request: Request):
+        authenticate(request)
+        with db.get_conn(settings.database_path) as conn:
+            row = conn.execute(
+                "SELECT id,rel_path,width,height,orientation,format,file_size,updated_at,source,enabled FROM images WHERE id=?",
+                (image_id,),
+            ).fetchone()
+            if row is None or row["source"] != "local":
+                raise HTTPException(404, "local image not found")
+            tag_rows = conn.execute(
+                "SELECT t.slug,t.display_name,t.enabled FROM image_tags x JOIN tags t ON t.id=x.tag_id WHERE x.image_id=? ORDER BY t.slug",
+                (image_id,),
+            ).fetchall()
+        tags_html = "".join(
+            f'<span class="badge {_tag_color_class(str(tag["slug"]))}{("" if tag["enabled"] else " off")}">{_escape(tag["display_name"])} <small>({_escape(tag["slug"])})</small></span>'
+            for tag in tag_rows
+        ) or '<span class="muted">无标签</span>'
+        rel_path = str(row["rel_path"])
+        group = _storage_group(rel_path)
+        return HTMLResponse(
+            f'<h2>图片详情 #{int(row["id"])}</h2>'
+            f'<img src="{_escape(admin_path)}/images/{int(row["id"])}/preview" alt="图片详情预览" style="max-width:100%;max-height:280px;object-fit:contain">'
+            f'<dl class="detail-grid"><dt>ID</dt><dd>{int(row["id"])}</dd><dt>文件名</dt><dd>{_escape(Path(rel_path).name)}</dd>'
+            f'<dt>真实方向</dt><dd>{_escape(row["orientation"])}</dd><dt>尺寸</dt><dd>{int(row["width"])} × {int(row["height"])} px</dd>'
+            f'<dt>文件大小</dt><dd>{int(row["file_size"])} bytes</dd><dt>格式</dt><dd>{_escape(row["format"])}</dd>'
+            f'<dt>物理存放目录</dt><dd>{_escape(group)}</dd><dt>相对路径</dt><dd><code>{_escape(rel_path)}</code></dd>'
+            f'<dt>来源</dt><dd>{_escape(row["source"])}</dd><dt>启用状态</dt><dd>{"启用" if row["enabled"] else "禁用"}</dd>'
+            f'<dt>缓存状态</dt><dd>管理员受保护预览</dd><dt>更新时间</dt><dd>{_escape(row["updated_at"])}</dd></dl>'
+            f'<section class="tags"><strong>完整标签</strong><div>{tags_html}</div></section>'
+        )
 
     @router.get("/images/{image_id}/preview")
     def local_preview(image_id: int, request: Request):
@@ -455,7 +696,7 @@ def create_admin_router(settings: Any) -> APIRouter:
         return FileResponse(target, media_type=str(row["content_type"]), headers={"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff"})
 
     @router.get("/images", response_class=HTMLResponse)
-    def images(request: Request, page: int = 1, per_page: int = 0, orientation: str = "", source: str = "local", cached: str = "", enabled: str = "", tag: str = "", storage: str = "", q: str = "") -> HTMLResponse:
+    def images(request: Request, page: int = 1, per_page: int = 0, orientation: str = "", source: str = "local", cached: str = "", enabled: str = "", tag: str = "", storage: str = "", q: str = "", sort: str = "added_at", direction: str = "desc") -> HTMLResponse:
         _sid, session = authenticate(request)
         source = source if source in {"local", "webdav"} else "local"
         page = max(1, page)
@@ -465,8 +706,11 @@ def create_admin_router(settings: Any) -> APIRouter:
         cached = cached if cached in {"0", "1"} else ""
         storage = storage if storage in {"root", "desktop", "mobile", "square"} else ""
         q = q.strip()[:100]
-        filters = {"source": source, "per_page": per_page, "orientation": orientation, "cached": cached, "enabled": enabled, "tag": tag, "storage": storage, "q": q}
-        nav = f'<nav><a href="{admin_path}">总览</a><a href="{admin_path}/images?source=local">本地图片</a><a href="{admin_path}/images?source=webdav">WebDAV</a><a href="{admin_path}/tags">标签</a></nav>'
+        sort = sort if sort in _SORT_COLUMNS else "added_at"
+        direction = direction.lower() if direction.lower() in {"asc", "desc"} else "desc"
+        sort_sql = _SORT_COLUMNS[sort]
+        order_sql = f"{sort_sql} {direction.upper()}, i.id DESC"
+        filters = {"source": source, "per_page": per_page, "orientation": orientation, "cached": cached, "enabled": enabled, "tag": tag, "storage": storage, "q": q, "sort": sort, "direction": direction}
         with db.get_conn(settings.database_path) as conn:
             all_tags = conn.execute("SELECT id,slug,display_name,enabled FROM tags ORDER BY slug").fetchall()
             if tag and conn.execute("SELECT 1 FROM tags WHERE slug=? COLLATE NOCASE", (tag,)).fetchone() is None:
@@ -482,17 +726,18 @@ def create_admin_router(settings: Any) -> APIRouter:
                 if q: clauses.append("o.href LIKE ? ESCAPE '\\'"); args.append(_like_pattern(q))
                 where = " WHERE " + " AND ".join(clauses)
                 total = int(conn.execute("SELECT COUNT(*) FROM webdav_objects o LEFT JOIN webdav_cache c ON c.href=o.href" + where, args).fetchone()[0])
-                rows = conn.execute("SELECT o.href,o.orientation,o.enabled,c.href IS NOT NULL cached FROM webdav_objects o LEFT JOIN webdav_cache c ON c.href=o.href" + where + " ORDER BY o.href LIMIT ? OFFSET ?", (*args, per_page, (page-1)*per_page)).fetchall()
+                webdav_order_sql = _WEBDAV_SORT_COLUMNS[sort]
+                rows = conn.execute("SELECT o.href,o.orientation,o.enabled,c.href IS NOT NULL cached FROM webdav_objects o LEFT JOIN webdav_cache c ON c.href=o.href" + where + " ORDER BY " + webdav_order_sql + " " + direction.upper() + ", o.href LIMIT ? OFFSET ?", (*args, per_page, (page-1)*per_page)).fetchall()
                 cards = []
                 for row in rows:
                     href_raw = str(row["href"]); href = _escape(href_raw)
                     related = conn.execute("SELECT t.id,t.slug,t.enabled FROM webdav_object_tags x JOIN tags t ON t.id=x.tag_id WHERE x.href=? ORDER BY t.slug", (href_raw,)).fetchall()
-                    badges = "".join(f'<span class="badge{("" if x["enabled"] else " off")}">{_escape(x["slug"])}</span>' for x in related) or '<span class="muted">无标签</span>'
-                    choices = "".join(f'<option value="{int(x["id"])}">{_escape(x["slug"])}</option>' for x in all_tags if x["enabled"])
-                    media = f'<img loading="lazy" src="{admin_path}/webdav/preview?{_escape(urlencode({"href": href_raw}))}" alt="WebDAV 缓存预览">' if row["cached"] else '<div class="placeholder">未缓存，不自动下载</div>'
+                    badges = "".join(f'<span class="badge {_tag_color_class(str(x["slug"]))}{("" if x["enabled"] else " off")}">{_escape(x["slug"])}</span>' for x in related) or '<span class="muted">无标签</span>'
+                    choices = "".join(f'<option value="{int(x["id"])}">{_escape(x["display_name"])} — {_escape(x["slug"])}</option>' for x in all_tags if x["enabled"])
+                    media = (f'<div class="preview-frame"><img loading="lazy" src="{admin_path}/webdav/preview?{_escape(urlencode({"href": href_raw}))}" alt="WebDAV 缓存预览"><div class="preview-overlay"><span class="badge">方向：{_escape(row["orientation"])}</span><span class="badge {"ok" if row["enabled"] else "off"}">{"启用" if row["enabled"] else "禁用"}</span></div></div>' if row["cached"] else '<div class="preview-frame"><div class="placeholder">未缓存，不自动下载</div><div class="preview-overlay"><span class="badge">WebDAV</span><span class="badge off">未缓存</span></div></div>')
                     forms = f'<form method="post" action="{admin_path}/webdav/enabled">{hidden(session.csrf)}<input type="hidden" name="href" value="{href}"><input type="hidden" name="enabled" value="{1-int(row["enabled"])}"><button class="secondary">{"禁用" if row["enabled"] else "启用"}</button></form>'
-                    forms += f'<form method="post" action="{admin_path}/webdav/tags">{hidden(session.csrf)}<input type="hidden" name="href" value="{href}"><select name="tag_id" required><option value="">选择标签</option>{choices}</select><select name="action"><option value="add">添加</option><option value="remove">移除</option></select><button>更新标签</button></form>'
-                    cards.append(f'<article class="card">{media}<div class="card-body"><div>{badges}</div><p class="muted">{href}</p><span class="badge">真实方向：{_escape(row["orientation"])}</span><span class="badge {"ok" if row["enabled"] else "off"}">{"启用" if row["enabled"] else "禁用"}</span><div class="actions">{forms}</div></div></article>')
+                    forms += f'<form method="post" action="{admin_path}/webdav/tags"><span class="muted">添加或移除标签（可选）</span>{hidden(session.csrf)}<input type="hidden" name="href" value="{href}"><select name="tag_id" required><option value="">选择标签</option>{choices}</select><select name="action"><option value="add">添加标签</option><option value="remove">移除标签</option></select><button>更新标签</button></form>'
+                    cards.append(f'<article class="card">{media}<div class="card-body"><div class="tags"><span class="tags-label">标签</span>{badges}</div><p class="path"><code>{href}</code></p><div class="card-meta"><span class="badge">真实方向：{_escape(row["orientation"])}</span><span class="badge">存放目录：WebDAV</span><span class="badge {"ok" if row["enabled"] else "off"}">{"启用" if row["enabled"] else "禁用"}</span></div><div class="card-action-group"><strong>管理此图片</strong><div class="actions">{forms}</div></div></div></article>')
                 heading = "WebDAV 图片"; listing = "".join(cards)
             else:
                 clauses.append("i.source='local'")
@@ -504,50 +749,72 @@ def create_admin_router(settings: Any) -> APIRouter:
                 if q: clauses.append("i.rel_path LIKE ? ESCAPE '\\'"); args.append(_like_pattern(q))
                 where = " WHERE " + " AND ".join(clauses)
                 total = int(conn.execute("SELECT COUNT(*) FROM images i" + where, args).fetchone()[0])
-                rows = conn.execute("SELECT i.id,i.rel_path,i.orientation,i.enabled FROM images i" + where + " ORDER BY i.id DESC LIMIT ? OFFSET ?", (*args, per_page, (page-1)*per_page)).fetchall()
+                rows = conn.execute("SELECT i.id,i.rel_path,i.orientation,i.enabled FROM images i" + where + " ORDER BY " + order_sql + " LIMIT ? OFFSET ?", (*args, per_page, (page-1)*per_page)).fetchall()
                 cards = []
-                choices = "".join(f'<option value="{int(x["id"])}">{_escape(x["slug"])}</option>' for x in all_tags if x["enabled"])
+                choices = "".join(f'<option value="{int(x["id"])}">{_escape(x["display_name"])} — {_escape(x["slug"])}</option>' for x in all_tags if x["enabled"])
                 for row in rows:
                     iid=int(row["id"]); rel=_escape(row["rel_path"]); group=_storage_group(str(row["rel_path"]))
                     related=conn.execute("SELECT t.slug,t.enabled FROM image_tags x JOIN tags t ON t.id=x.tag_id WHERE x.image_id=? ORDER BY t.slug",(iid,)).fetchall()
-                    badges="".join(f'<span class="badge{("" if x["enabled"] else " off")}">{_escape(x["slug"])}</span>' for x in related) or '<span class="muted">无标签</span>'
+                    badges="".join(f'<span class="badge {_tag_color_class(str(x["slug"]))}{("" if x["enabled"] else " off")}">{_escape(x["slug"])}</span>' for x in related) or '<span class="muted">无标签</span>'
                     toggle=f'<form method="post" action="{admin_path}/images/{iid}/enabled">{hidden(session.csrf)}<input type="hidden" name="enabled" value="{1-int(row["enabled"])}"><button class="secondary">{"禁用" if row["enabled"] else "启用"}</button></form>'
                     delete=f'<form method="post" action="{admin_path}/images/{iid}/delete" onsubmit="return confirm(\'确定删除本地原图？此操作不可撤销。\')">{hidden(session.csrf)}<input type="hidden" name="confirm" value="1"><button class="danger">删除本地原图</button></form>'
                     move=f'<form method="post" action="{admin_path}/images/{iid}/move">{hidden(session.csrf)}<select name="target" required><option value="desktop">desktop</option><option value="mobile">mobile</option><option value="square">square</option></select><button>移动归档</button></form>'
-                    tags_form=f'<form method="post" action="{admin_path}/images/{iid}/tags">{hidden(session.csrf)}<select name="tag_id" required><option value="">选择标签</option>{choices}</select><select name="action"><option value="add">添加</option><option value="remove">移除</option></select><button>更新标签</button></form>'
-                    cards.append(f'<article class="card"><img loading="lazy" src="{admin_path}/images/{iid}/preview" alt="本地图片 #{iid}"><div class="card-body"><label class="check"><input type="checkbox" form="batch-tags" name="image_ids" value="{iid}">选择 #{iid}</label><p class="muted">{rel}</p><span class="badge">真实方向：{_escape(row["orientation"])}</span><span class="badge">存放目录：{group}</span><span class="badge {"ok" if row["enabled"] else "off"}">{"启用" if row["enabled"] else "禁用"}</span><div>{badges}</div><div class="actions">{toggle}{move}{tags_form}{delete}</div></div></article>')
+                    tags_form=f'<form method="post" action="{admin_path}/images/{iid}/tags"><span class="muted">添加或移除标签（可选）</span>{hidden(session.csrf)}<select name="tag_id" required><option value="">选择标签</option>{choices}</select><select name="action"><option value="add">添加标签</option><option value="remove">移除标签</option></select><button>更新标签</button></form>'
+                    orientation_label = _escape(str(row["orientation"]))
+                    status_class = "ok" if row["enabled"] else "off"
+                    status_label = "启用" if row["enabled"] else "禁用"
+                    cards.append(f'<article class="card"><div class="preview-frame"><img loading="lazy" data-lightbox-src="{admin_path}/images/{iid}/preview" data-lightbox-alt="本地图片 #{iid}" src="{admin_path}/images/{iid}/preview" alt="本地图片 #{iid}"><div class="preview-overlay"><span class="badge">{orientation_label}</span><span class="badge {status_class}">{status_label}</span></div></div><div class="card-body"><label class="check"><input type="checkbox" data-batch-image form="batch-tags" name="image_ids" value="{iid}">选择 #{iid}</label><button type="button" class="link" data-detail-url="{admin_path}/images/{iid}/detail" aria-label="查看图片 {iid} 详情">查看详情</button><p class="path"><code>{rel}</code></p><div class="card-meta"><span class="badge">真实方向：{orientation_label}</span><span class="badge">存放目录：{_escape(group)}</span><span class="badge {status_class}">{status_label}</span></div><div class="tags"><span class="tags-label">标签</span>{badges}</div><div class="card-action-group shortcut-menu"><details><summary class="button secondary manage-entry" aria-label="打开图片快捷菜单">管理此图片</summary><div class="actions"><span class="muted">状态 / 标签 / 归档</span>{toggle}{move}{tags_form}</div></details></div><div class="card-action-group danger-zone"><details><summary>危险操作</summary><div class="actions"><span class="muted">危险操作</span>{delete}</div></details></div></div></article>')
                 heading="本地图片"; listing="".join(cards)
         def opts(values: list[tuple[str,str]], current: str) -> str:
             return '<option value="">全部</option>'+''.join(f'<option value="{_escape(v)}"{" selected" if v==current else ""}>{_escape(label)}</option>' for v,label in values)
         tag_opts='<option value="">全部标签</option>'+''.join(f'<option value="{_escape(x["slug"])}"{" selected" if x["slug"]==tag else ""}>{_escape(x["slug"])}</option>' for x in all_tags)
-        controls=f'<form class="filters panel" method="get"><label>来源<select name="source">{opts([("local","本地"),("webdav","WebDAV")],source)}</select></label><label>真实方向<select name="orientation">{opts([("desktop","desktop"),("mobile","mobile"),("square","square")],orientation)}</select></label><label>存放目录<select name="storage">{opts([("root","根目录"),("desktop","desktop"),("mobile","mobile"),("square","square")],storage)}</select></label><label>启用状态<select name="enabled">{opts([("1","启用"),("0","禁用")],enabled)}</select></label><label>缓存状态<select name="cached">{opts([("1","已缓存"),("0","未缓存")],cached)}</select></label><label>标签<select name="tag">{tag_opts}</select></label><label>文件名/HREF<input name="q" value="{_escape(q)}"></label><label>每页<select name="per_page">{opts([("12","12"),("20","20"),("40","40"),("80","80")],str(per_page))}</select></label><button>筛选</button></form>'
+        controls=(f'<section class="panel toolbar"><div><p class="eyebrow">图片库</p><h3>筛选工具栏</h3><span class="help-text">先用快速筛选缩小范围，再展开高级筛选。</span></div><a class="clear-filter" href="{_escape(admin_path)}/images?source={_escape(source)}">清除筛选</a></section><section class="panel"><div class="filter-group"><h3>快速筛选</h3><form class="filters" method="get"><label>数据来源<select name="source">{opts([("local","本地图片"),("webdav","WebDAV 图片")],source)}</select></label><label>真实方向<select name="orientation">{opts([("desktop","横屏 Desktop"),("mobile","竖屏 Mobile"),("square","方形 Square")],orientation)}</select></label><label>标签<select name="tag">{tag_opts}</select></label><button>应用快速筛选</button></form></div><details class="filter-group"><summary><h3>高级筛选</h3></summary><form class="filters" method="get"><input type="hidden" name="source" value="{_escape(source)}"><input type="hidden" name="orientation" value="{_escape(orientation)}"><input type="hidden" name="tag" value="{_escape(tag)}"><label>存放目录<select name="storage">{opts([("root","根目录"),("desktop","desktop 目录"),("mobile","mobile 目录"),("square","square 目录")],storage)}</select></label><label>启用状态<select name="enabled">{opts([("1","仅启用"),("0","仅停用")],enabled)}</select></label><label>缓存状态<select name="cached">{opts([("1","已缓存"),("0","未缓存")],cached)}</select></label><label>文件名 / HREF<input name="q" value="{_escape(q)}" placeholder="输入关键词"></label><label>排序字段<select name="sort">{opts([("added_at","添加时间"),("filename","文件名"),("direction","真实方向"),("source","来源")],sort)}</select></label><label>排序方向<select name="direction">{opts([("asc","升序"),("desc","降序")],direction)}</select></label><label>每页数量<select name="per_page">{opts([("12","12 条"),("20","20 条"),("40","40 条"),("80","80 条")],str(per_page))}</select></label><button class="secondary">应用高级筛选</button></form></details></section>')
+
         pager=[]
         if page>1: pager.append(f'<a rel="prev" href="{admin_path}/images?{_escape(urlencode({**filters,"page":page-1}))}">上一页</a>')
         if page*per_page<total: pager.append(f'<a rel="next" href="{admin_path}/images?{_escape(urlencode({**filters,"page":page+1}))}">下一页</a>')
         batch=""
         if source=="local":
-            candidates=''.join(f'<option value="{int(x["id"])}">{_escape(x["slug"])}</option>' for x in all_tags if x["enabled"])
-            batch=f'<form class="panel form-grid" id="batch-tags" method="post" action="{admin_path}/images/tags">{hidden(session.csrf)}<label>批量标签<select name="tag_id" required>{candidates}</select></label><label>操作<select name="action"><option value="add">添加</option><option value="remove">移除</option></select></label><button>应用到选中图片</button></form>'
-        return _page("图片",f'{nav}{controls}<h2>{heading}</h2><p>总计 {total}</p><section class="grid">{listing}</section>{batch}<nav class="pager">{" ".join(pager)}</nav>',session.csrf)
+            candidates=''.join(f'<option value="{int(x["id"])}">{_escape(x["display_name"])} — {_escape(x["slug"])}</option>' for x in all_tags if x["enabled"])
+            batch=f'<form class="panel form-grid floating-toolbar" id="batch-tags" data-batch-toolbar="1" method="post" action="{admin_path}/images/tags"><p class="muted">批量标签：先勾选图片，再选择标签和操作。<span id="batch-count">请选择图片</span> <button type="button" class="secondary" data-batch-select="all">全选</button> <button type="button" class="secondary" data-batch-select="none">取消全选</button></p>{hidden(session.csrf)}<label>批量标签<select name="tag_id" required><option value="">选择标签</option>{candidates}</select></label><label>操作<select name="action"><option value="add">添加标签</option><option value="remove">移除标签</option></select></label><button type="submit">应用到选中图片</button></form>'
+        result = f'<section class="result-toolbar"><div><p class="eyebrow">图片库</p><h2>{_escape(heading)}</h2><p class="muted">真实方向来自图片内容；存放目录只是文件所在的归档目录。</p><p class="muted">操作按状态、标签、归档分组；危险操作会要求确认。删除本地原图前会提示：确定删除本地原图？此操作不可撤销。</p></div><strong>筛选结果：{int(total)} 张</strong></section>'
+        if not listing:
+            listing = '<section class="panel empty-state"><div class="empty-icon" aria-hidden="true">▧</div><h3>没有匹配的图片</h3><p class="muted">调整筛选条件，或先从总览上传图片。</p></section>'
+        layers='<section id="image-lightbox" class="lightbox" role="dialog" aria-modal="true" aria-label="大图预览" hidden><button type="button" class="dialog-close" data-close-layer="image-lightbox" aria-label="关闭大图">关闭</button><img alt="大图预览"></section><section id="image-detail-drawer" class="drawer" role="dialog" aria-modal="true" aria-label="图片详情" hidden><aside class="drawer-panel"><button type="button" class="dialog-close" data-close-layer="image-detail-drawer" aria-label="关闭详情">关闭</button><div class="drawer-content"></div></aside></section>'
+        return _page("图片库",f'{controls}{result}<section class="grid">{listing}</section>{batch}<nav class="pager">{" ".join(pager)}</nav>{layers}',session.csrf,page_nav("images", session.csrf))
 
     @router.post("/images/tags")
     async def batch_tags(request: Request):
-        _sid,_session,form=await write_auth(request)
-        ids={int(v) for v in form.getlist("image_ids") if str(v).isdigit()}
-        if not ids: raise HTTPException(400,"no images selected")
-        action=str(form.get("action",""))
-        if action not in {"add","remove"}: raise HTTPException(400,"invalid action")
-        with db.get_conn(settings.database_path) as conn:
-            raw=str(form.get("tag_id",form.get("tag","")))
-            row=conn.execute("SELECT id FROM tags WHERE id=? AND enabled=1",(int(raw),)).fetchone() if raw.isdigit() else conn.execute("SELECT id FROM tags WHERE slug=? COLLATE NOCASE AND enabled=1",(db.validate_slug(raw),)).fetchone()
-            if row is None: raise HTTPException(404,"enabled tag not found")
-            tag_id=int(row["id"])
-            valid={int(x[0]) for x in conn.execute(f"SELECT id FROM images WHERE source='local' AND id IN ({','.join('?' for _ in ids)})",tuple(ids))}
-            if valid != ids: raise HTTPException(404,"local image not found")
-            for iid in ids:
-                if action=="add": conn.execute("INSERT OR IGNORE INTO image_tags(image_id,tag_id,created_at) VALUES(?,?,?)",(iid,tag_id,db.utc_now()))
-                else: conn.execute("DELETE FROM image_tags WHERE image_id=? AND tag_id=?",(iid,tag_id))
-        scan(request)
+        _sid, _session, form = await write_auth(request)
+        try:
+            ids = {int(v) for v in form.getlist("image_ids") if str(v).isdigit()}
+            if not ids:
+                raise ValueError("请先选择至少一张图片")
+            action = str(form.get("action", ""))
+            if action not in {"add", "remove"}:
+                raise ValueError("无效的标签操作")
+            raw = str(form.get("tag_id", form.get("tag", ""))).strip()
+            if not raw:
+                raise ValueError("未选择标签")
+            with db.get_conn(settings.database_path) as conn:
+                row = (conn.execute("SELECT id FROM tags WHERE id=? AND enabled=1", (int(raw),)).fetchone()
+                       if raw.isdigit() else conn.execute("SELECT id FROM tags WHERE slug=? COLLATE NOCASE AND enabled=1", (db.validate_slug(raw),)).fetchone())
+                if row is None:
+                    raise LookupError("标签不存在或已禁用")
+                tag_id = int(row["id"])
+                valid = {int(x[0]) for x in conn.execute(f"SELECT id FROM images WHERE source='local' AND id IN ({','.join('?' for _ in ids)})", tuple(ids))}
+                if valid != ids:
+                    raise LookupError("图片不存在")
+                for iid in ids:
+                    if action == "add":
+                        conn.execute("INSERT OR IGNORE INTO image_tags(image_id,tag_id,created_at) VALUES(?,?,?)", (iid, tag_id, db.utc_now()))
+                    else:
+                        conn.execute("DELETE FROM image_tags WHERE image_id=? AND tag_id=?", (iid, tag_id))
+            scan(request)
+        except HTTPException:
+            raise
+        except (ValueError, LookupError, sqlite3.IntegrityError, OSError) as exc:
+            return _error_page("批量标签操作失败", str(exc) if isinstance(exc, (ValueError, LookupError)) else "标签操作无法完成")
         return _redirect(f"{admin_path}/images?source=local", "标签已更新")
 
     @router.post("/images/{image_id}/tags")
@@ -555,31 +822,24 @@ def create_admin_router(settings: Any) -> APIRouter:
         _sid, _session, form = await write_auth(request)
         action = str(form.get("action", ""))
         if action not in {"add", "remove"}:
-            raise HTTPException(400, "invalid action")
-        raw_tag_id = str(form.get("tag_id", ""))
+            return _error_page("图片标签操作失败", "无效的标签操作", 400)
+        raw_tag_id = str(form.get("tag_id", "")).strip()
         if not raw_tag_id.isdigit():
-            raise HTTPException(400, "invalid tag id")
+            return _error_page("图片标签操作失败", "未选择标签", 400)
         tag_id = int(raw_tag_id)
-        with db.get_conn(settings.database_path) as conn:
-            if conn.execute(
-                "SELECT 1 FROM images WHERE id=? AND source='local'", (image_id,)
-            ).fetchone() is None:
-                raise HTTPException(404, "local image not found")
-            if conn.execute(
-                "SELECT 1 FROM tags WHERE id=? AND enabled=1", (tag_id,)
-            ).fetchone() is None:
-                raise HTTPException(404, "enabled tag not found")
-            if action == "add":
-                conn.execute(
-                    "INSERT OR IGNORE INTO image_tags(image_id,tag_id,created_at) VALUES(?,?,?)",
-                    (image_id, tag_id, db.utc_now()),
-                )
-            else:
-                conn.execute(
-                    "DELETE FROM image_tags WHERE image_id=? AND tag_id=?",
-                    (image_id, tag_id),
-                )
-        scan(request)
+        try:
+            with db.get_conn(settings.database_path) as conn:
+                if conn.execute("SELECT 1 FROM images WHERE id=? AND source='local'", (image_id,)).fetchone() is None:
+                    return _error_page("图片标签操作失败", "本地图片不存在", 404)
+                if conn.execute("SELECT 1 FROM tags WHERE id=? AND enabled=1", (tag_id,)).fetchone() is None:
+                    return _error_page("图片标签操作失败", "标签不存在或已禁用", 404)
+                if action == "add":
+                    conn.execute("INSERT OR IGNORE INTO image_tags(image_id,tag_id,created_at) VALUES(?,?,?)", (image_id, tag_id, db.utc_now()))
+                else:
+                    conn.execute("DELETE FROM image_tags WHERE image_id=? AND tag_id=?", (image_id, tag_id))
+            scan(request)
+        except (sqlite3.IntegrityError, OSError):
+            return _error_page("图片标签操作失败", "标签操作无法完成，请稍后重试。", 503)
         return _redirect(f"{admin_path}/images?source=local", "图片标签已更新")
 
     @router.get("/tags", response_class=HTMLResponse)
@@ -587,64 +847,98 @@ def create_admin_router(settings: Any) -> APIRouter:
         _sid, session = authenticate(request)
         with db.get_conn(settings.database_path) as conn:
             rows = conn.execute("SELECT * FROM tags ORDER BY slug").fetchall()
+            counts = {int(row["id"]): (int(row["local_count"]), int(row["remote_count"])) for row in conn.execute(
+                "SELECT t.id, COUNT(DISTINCT it.image_id) local_count, COUNT(DISTINCT wt.href) remote_count "
+                "FROM tags t LEFT JOIN image_tags it ON it.tag_id=t.id LEFT JOIN webdav_object_tags wt ON wt.tag_id=t.id GROUP BY t.id"
+            )}
         items = []
         for row in rows:
-            tag_id = int(row["id"])
-            slug = _escape(row["slug"])
-            name = _escape(row["display_name"])
-            edit = f'<form method="post" action="{admin_path}/tags/{tag_id}/edit">{hidden(session.csrf)}<input name="slug" value="{slug}" required><input name="display_name" value="{name}" required><button>编辑</button></form>'
-            toggle = f'<form method="post" action="{admin_path}/tags/{tag_id}/disable">{hidden(session.csrf)}<input type="hidden" name="enabled" value="{1-int(row["enabled"])}"><button>{"禁用" if row["enabled"] else "启用"}</button></form>'
-            merge = f'<form method="post" action="{admin_path}/tags/{tag_id}/merge">{hidden(session.csrf)}<select name="target_id">' + "".join(f'<option value="{int(target["id"])}">{_escape(target["slug"])}</option>' for target in rows if int(target["id"]) != tag_id) + '</select><button>合并</button></form>'
-            items.append(f'<li>{slug} — {name} enabled={int(row["enabled"])}{edit}{toggle}{merge}</li>')
-        listing = "".join(items)
-        body = f'<ul>{listing}</ul><form method="post">{hidden(session.csrf)}<input name="slug" required><input name="display_name" required><button>创建</button></form>'
-        return _page("标签", body, session.csrf)
+            tag_id = int(row["id"]); slug = _escape(row["slug"]); name = _escape(row["display_name"])
+            local_count, remote_count = counts.get(tag_id, (0, 0))
+            edit = f'<form method="post" action="{_escape(admin_path)}/tags/{tag_id}/edit">{hidden(session.csrf)}<label>显示名称<input name="display_name" value="{name}" required maxlength="100"></label><label>Slug<input name="slug" value="{slug}" required maxlength="63"></label><button>保存编辑</button></form>'
+            toggle = f'<form method="post" action="{_escape(admin_path)}/tags/{tag_id}/disable" onsubmit="return confirm(\'确定{"启用" if not row["enabled"] else "停用"}此标签？\')">{hidden(session.csrf)}<input type="hidden" name="enabled" value="{1-int(row["enabled"])}"><button class="secondary">{"启用标签" if not row["enabled"] else "停用标签"}</button></form>'
+            merge = f'<form method="post" action="{_escape(admin_path)}/tags/{tag_id}/merge" onsubmit="return confirm(\'合并后源标签将被删除，确定继续？\')">{hidden(session.csrf)}<label>合并到<select name="target_id" required><option value="">选择目标标签</option>' + "".join(f'<option value="{int(target["id"])}">{_escape(target["display_name"])} — {_escape(target["slug"])}</option>' for target in rows if int(target["id"]) != tag_id) + '</select></label><button class="warning">合并并删除源标签</button></form>'
+            status = "已启用" if row["enabled"] else "已停用"; status_class = "ok" if row["enabled"] else "off"
+            items.append(f'<article class="panel"><div class="section-heading"><div><h3>{name}</h3><p class="muted">slug：<code>{slug}</code></p></div><span class="badge {status_class}">{status}</span></div><div class="stats"><div class="stat"><span>本地关联</span><strong>{local_count}</strong></div><div class="stat"><span>WebDAV 关联</span><strong>{remote_count}</strong></div></div><details><summary>编辑、启停或合并</summary><div class="workspace-grid tag-actions">{edit}{toggle}{merge}</div></details></article>')
+        listing = "".join(items) or f'<section class="panel empty-state"><div class="empty-icon" aria-hidden="true">#</div><h3>还没有标签</h3><p class="muted">先创建第一个标签，上传时就能选择；标签 slug 之后可用于主题 API。</p><a class="button" href="#create-tag">创建第一个标签</a></section>'
+        body = (f'<section class="panel"><p class="eyebrow">标签工作台</p><h2>显示名称给人看，slug 给 API 用</h2><p class="lead">显示名称可以是中文；slug 是唯一、稳定、仅含小写字母、数字和连字符的 API 标识。</p></section>'
+                f'<section class="panel" id="create-tag"><h2>创建标签</h2><p class="muted">创建后可在上传和图片库中给图片打标签。标签为空时不能提交标签操作。</p><form method="post" class="form-grid">{hidden(session.csrf)}<label>显示名称<span class="label-note">例如：夏日风景</span><input name="display_name" required maxlength="100"></label><label>Slug<span class="label-note">例如：summer-landscape</span><input name="slug" required maxlength="63" pattern="[a-z0-9](?:[a-z0-9-]{{0,61}}[a-z0-9])?"></label><button>创建标签</button></form></section><div class="section-heading"><div><p class="eyebrow">已有标签</p><h2>标签列表</h2></div><span class="muted">共 {len(rows)} 个</span></div><section>{listing}</section>')
+        return _page("标签工作台", body, session.csrf, page_nav("tags", session.csrf))
 
     @router.post("/tags")
     async def create_tag(request: Request):
         _sid, _session, form = await write_auth(request)
-        with db.get_conn(settings.database_path) as conn:
-            db.ensure_tag(conn, str(form.get("slug", "")), str(form.get("display_name", "")))
+        try:
+            with db.get_conn(settings.database_path) as conn:
+                db.ensure_tag(conn, str(form.get("slug", "")), str(form.get("display_name", "")))
+        except ValueError as exc:
+            return _error_page("创建标签失败", "标签格式或名称无效，请检查后重试。")
+        except (sqlite3.IntegrityError, OSError):
+            return _error_page("创建标签失败", "标签无法保存，可能已存在或数据库暂时不可用。")
         return _redirect(f"{admin_path}/tags", "标签已创建")
 
     @router.post("/tags/{tag_id}/edit")
     async def edit_tag(tag_id: int, request: Request):
         _sid, _session, form = await write_auth(request)
-        slug = db.validate_slug(str(form.get("slug", "")))
-        name = str(form.get("display_name", "")).strip()
-        if not name or len(name) > 100:
-            raise HTTPException(400, "invalid display name")
-        with db.get_conn(settings.database_path) as conn:
-            cursor = conn.execute("UPDATE tags SET slug=?,display_name=?,updated_at=? WHERE id=?", (slug, name, db.utc_now(), tag_id))
-            if not cursor.rowcount:
-                raise HTTPException(404, "tag not found")
-        scan(request)
+        try:
+            slug = db.validate_slug(str(form.get("slug", "")))
+            name = str(form.get("display_name", "")).strip()
+            if not name or len(name) > 100:
+                raise ValueError("invalid display name")
+            with db.get_conn(settings.database_path) as conn:
+                cursor = conn.execute("UPDATE tags SET slug=?,display_name=?,updated_at=? WHERE id=?", (slug, name, db.utc_now(), tag_id))
+                if not cursor.rowcount:
+                    return _error_page("编辑标签失败", "标签不存在", 404)
+            scan(request)
+        except ValueError:
+            return _error_page("编辑标签失败", "标签格式或名称无效，请检查后重试。", 400)
+        except sqlite3.IntegrityError:
+            return _error_page("编辑标签失败", "标签无法保存，Slug 可能已存在。", 409)
+        except (sqlite3.Error, OSError):
+            return _error_page("编辑标签失败", "标签无法保存，请稍后重试。", 503)
+        except (importer.ImportErrorBase, RuntimeError):
+            return _error_page("编辑标签失败", "图库扫描失败，请稍后重试。", 503)
         return _redirect(f"{admin_path}/tags", "标签已编辑")
 
     @router.post("/tags/{tag_id}/disable")
     async def disable_tag(tag_id: int, request: Request):
         _sid, _session, form = await write_auth(request)
         enabled = 1 if str(form.get("enabled", "0")) == "1" else 0
-        with db.get_conn(settings.database_path) as conn:
-            if not conn.execute("UPDATE tags SET enabled=?,updated_at=? WHERE id=?", (enabled, db.utc_now(), tag_id)).rowcount:
-                raise HTTPException(404, "tag not found")
-        scan(request)
+        try:
+            with db.get_conn(settings.database_path) as conn:
+                if not conn.execute("UPDATE tags SET enabled=?,updated_at=? WHERE id=?", (enabled, db.utc_now(), tag_id)).rowcount:
+                    return _error_page("更新标签失败", "标签不存在", 404)
+            scan(request)
+        except (sqlite3.Error, OSError):
+            return _error_page("更新标签失败", "标签状态无法保存，请稍后重试。", 503)
+        except (importer.ImportErrorBase, RuntimeError):
+            return _error_page("更新标签失败", "图库扫描失败，请稍后重试。", 503)
         return _redirect(f"{admin_path}/tags", "标签状态已更新")
 
     @router.post("/tags/{tag_id}/merge")
     async def merge_tag(tag_id: int, request: Request):
         _sid, _session, form = await write_auth(request)
-        target_id = int(str(form.get("target_id", "0")))
+        try:
+            target_id = int(str(form.get("target_id", "0")))
+        except ValueError:
+            return _error_page("合并标签失败", "请选择有效的目标标签", 400)
         if target_id <= 0 or target_id == tag_id:
-            raise HTTPException(400, "invalid target tag")
-        with db.get_conn(settings.database_path) as conn:
-            if conn.execute("SELECT 1 FROM tags WHERE id=?", (target_id,)).fetchone() is None:
-                raise HTTPException(404, "target tag not found")
-            conn.execute("INSERT OR IGNORE INTO image_tags(image_id,tag_id,created_at) SELECT image_id,?,created_at FROM image_tags WHERE tag_id=?", (target_id, tag_id))
-            conn.execute("INSERT OR IGNORE INTO webdav_object_tags(href,tag_id,origin,created_at) SELECT href,?,origin,created_at FROM webdav_object_tags WHERE tag_id=?", (target_id, tag_id))
-            if not conn.execute("DELETE FROM tags WHERE id=?", (tag_id,)).rowcount:
-                raise HTTPException(404, "source tag not found")
-        scan(request)
+            return _error_page("合并标签失败", "请选择不同的目标标签", 400)
+        try:
+            with db.get_conn(settings.database_path) as conn:
+                if conn.execute("SELECT 1 FROM tags WHERE id=?", (target_id,)).fetchone() is None:
+                    return _error_page("合并标签失败", "目标标签不存在", 404)
+                conn.execute("INSERT OR IGNORE INTO image_tags(image_id,tag_id,created_at) SELECT image_id,?,created_at FROM image_tags WHERE tag_id=?", (target_id, tag_id))
+                conn.execute("INSERT OR IGNORE INTO webdav_object_tags(href,tag_id,origin,created_at) SELECT href,?,origin,created_at FROM webdav_object_tags WHERE tag_id=?", (target_id, tag_id))
+                if not conn.execute("DELETE FROM tags WHERE id=?", (tag_id,)).rowcount:
+                    return _error_page("合并标签失败", "源标签不存在", 404)
+            scan(request)
+        except sqlite3.IntegrityError:
+            return _error_page("合并标签失败", "标签合并违反数据库约束，请检查目标标签。", 409)
+        except (sqlite3.Error, OSError):
+            return _error_page("合并标签失败", "标签无法合并，请稍后重试。", 503)
+        except (importer.ImportErrorBase, RuntimeError):
+            return _error_page("合并标签失败", "图库扫描失败，请稍后重试。", 503)
         return _redirect(f"{admin_path}/tags", "标签已合并")
 
     @router.post("/upload")
@@ -823,30 +1117,23 @@ def create_admin_router(settings: Any) -> APIRouter:
         href = str(form.get("href", ""))
         action = "remove" if force_remove else str(form.get("action", ""))
         if action not in {"add", "remove"}:
-            raise HTTPException(400, "invalid action")
-        raw_tag_id = str(form.get("tag_id", ""))
+            return _error_page("WebDAV 标签操作失败", "无效的标签操作", 400)
+        raw_tag_id = str(form.get("tag_id", "")).strip()
         if not raw_tag_id.isdigit():
-            raise HTTPException(400, "invalid tag id")
+            return _error_page("WebDAV 标签操作失败", "未选择标签", 400)
         tag_id = int(raw_tag_id)
-        with db.get_conn(settings.database_path) as conn:
-            if conn.execute(
-                "SELECT 1 FROM webdav_objects WHERE href=?", (href,)
-            ).fetchone() is None:
-                raise HTTPException(404, "WebDAV object not found")
-            if conn.execute(
-                "SELECT 1 FROM tags WHERE id=? AND enabled=1", (tag_id,)
-            ).fetchone() is None:
-                raise HTTPException(404, "enabled tag not found")
-            if action == "add":
-                conn.execute(
-                    "INSERT OR IGNORE INTO webdav_object_tags(href,tag_id,origin,created_at) VALUES(?,?,'admin',?)",
-                    (href, tag_id, db.utc_now()),
-                )
-            else:
-                conn.execute(
-                    "DELETE FROM webdav_object_tags WHERE href=? AND tag_id=?",
-                    (href, tag_id),
-                )
+        try:
+            with db.get_conn(settings.database_path) as conn:
+                if conn.execute("SELECT 1 FROM webdav_objects WHERE href=?", (href,)).fetchone() is None:
+                    return _error_page("WebDAV 标签操作失败", "WebDAV 图片不存在", 404)
+                if conn.execute("SELECT 1 FROM tags WHERE id=? AND enabled=1", (tag_id,)).fetchone() is None:
+                    return _error_page("WebDAV 标签操作失败", "标签不存在或已禁用", 404)
+                if action == "add":
+                    conn.execute("INSERT OR IGNORE INTO webdav_object_tags(href,tag_id,origin,created_at) VALUES(?,?,'admin',?)", (href, tag_id, db.utc_now()))
+                else:
+                    conn.execute("DELETE FROM webdav_object_tags WHERE href=? AND tag_id=?", (href, tag_id))
+        except (sqlite3.IntegrityError, OSError):
+            return _error_page("WebDAV 标签操作失败", "标签操作无法完成，请稍后重试。", 503)
         return _redirect(f"{admin_path}/images?source=webdav", "WebDAV 标签已更新")
 
     @router.post("/webdav/tags")
@@ -865,10 +1152,9 @@ def create_admin_router(settings: Any) -> APIRouter:
         with db.get_conn(settings.database_path) as conn:
             rows = conn.execute("SELECT cache_name FROM webdav_cache").fetchall()
             for row in rows:
-                candidate = (cache_root / row["cache_name"]).resolve()
                 try:
-                    candidate.relative_to(cache_root)
-                except ValueError:
+                    candidate = _safe_db_file(cache_root, str(row["cache_name"]))
+                except HTTPException:
                     continue
                 if candidate.is_file():
                     candidate.unlink(); removed += 1

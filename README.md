@@ -1,19 +1,19 @@
-# Random Image API V2.1
+# Random Image API V2.2
 
-Random Image API V2 是 V1 的**向后兼容扩展**：保留 V1 的 `GET /random`、`?type=`、本地图库、WebDAV Hybrid、默认 90% 远程优先、缓存、归档 importer、Backup / Restore，并新增主题标签和安全管理 UI。V2.1 在不改变 API 和数据库 schema 的前提下，重点优化管理网页与本地图片整理体验。
+Random Image API V2 是 V1 的**向后兼容扩展**：保留 V1 的 `GET /random`、`?type=`、本地图库、WebDAV Hybrid、默认 90% 远程优先、缓存、归档 importer、Backup / Restore，并新增主题标签和安全管理 UI。V2.2 在不改变 API 和数据库 schema 的前提下，重点优化管理网页与本地图片整理体验。
 
-> 当前发布状态：V2.1.0 已通过本地和远程隔离验收，完整测试为 `79 passed`。GitHub `main` 已包含提交 `d637c4b6d8f444516a6084e571748a9ba3c692e1`；Docker Hub `qinlingmonkey/random-image-api:v2` 已更新为 V2.1.0（`linux/amd64`，Registry 摘要 `sha256:d35f9c129d3c2119552b2b18877201125b224c4f918b0caee66ba1692d987a0e`）。`qinlingmonkey/random-image-api:v1` 继续保留用于旧部署与回滚。
+> 当前发布状态：V2.2.0 当前工作树为 V2.2.0 候选版本，GitHub 与 Docker Hub 发布信息将在本轮发布完成后补录。`qinlingmonkey/random-image-api:v1` 继续保留用于旧部署与回滚。
 
 V1 快照见 [docs/V1.md](docs/V1.md)，V1 原地升级和 VPS 迁移见 [MIGRATION.md](MIGRATION.md)。
 
-## 1. V2 与 V2.1 能力
+## 1. V2 与 V2.2 能力
 
 - `tags` 主题模型：一张本地图片或一个 WebDAV 对象可关联多个标签，多对多关系不会复制图片文件。
 - `GET /random/{slug}` 与 `GET /random?tag={slug}`：按主题随机返回图片。
 - 严格主题语义：未知、禁用或非法标签返回 `404`；标签存在但没有可用图片也返回 `404`；数据库不可用或无法安全降级的远端故障返回 `503`。
 - WebDAV 第一层主题：在 `desktop/`、`mobile/` 下的第一层子目录名可作为标签提示，例如 `desktop/anime/a.jpg` 对应 `anime`。
 - 浏览器管理 UI：响应式统计卡片、图片瀑布流、受保护预览、标签管理、多图上传、移动归档、友好删除确认、WebDAV 对象启停与标签维护、缓存清理、归档 preview-confirm。
-- V2.1 独立使用 `data/images/square/` 保存正方形图片；`SQUARE_POLICY` 只决定正方形图片进入哪些随机池，不再决定物理存放目录。
+- V2.2 独立使用 `data/images/square/` 保存正方形图片；`SQUARE_POLICY` 只决定正方形图片进入哪些随机池，不再决定物理存放目录。
 - SQLite V1→V2 幂等原地迁移：启动时创建标签关系表并补充新字段，原有未打标签图片仍可由 `GET /random` 使用。
 
 ## 2. 架构与数据
@@ -199,7 +199,7 @@ data/images/mobile/
 data/images/square/
 ```
 
-程序始终以图片真实宽高分类；`desktop/`、`mobile/`、`square/` 是物理归档目录，便于人工整理，不会覆盖真实方向。V2.1 上传和归档 importer 会把正方形图片保存到 `square/`。旧版本中位于根目录、`desktop/` 或 `mobile/` 的正方形图片仍兼容，不会被强制移动。等待周期扫描，或配置 `ADMIN_TOKEN` 后触发：
+程序始终以图片真实宽高分类；`desktop/`、`mobile/`、`square/` 是物理归档目录，便于人工整理，不会覆盖真实方向。V2.2 上传和归档 importer 会把正方形图片保存到 `square/`。旧版本中位于根目录、`desktop/` 或 `mobile/` 的正方形图片仍兼容，不会被强制移动。等待周期扫描，或配置 `ADMIN_TOKEN` 后触发：
 
 ```bash
 curl -fsS -X POST \

@@ -1,14 +1,14 @@
-# Random Image API：Docker Hub 与 V2.1 部署说明
+# Random Image API：Docker Hub 与 V2.2 部署说明
 
-Random Image API V2 是 V1 的向后兼容扩展，增加 tags、多对多主题、主题随机接口和安全管理 UI，同时保留 V1 的 `/random`、本地/Hybrid、WebDAV 默认 90% 远程优先、缓存、importer 和 Backup / Restore。V2.1 继续兼容 V2.0 的 API 与数据库，重点改善管理网页、图片预览、目录整理和标签编辑体验。
+Random Image API V2 是 V1 的向后兼容扩展，增加 tags、多对多主题、主题随机接口和安全管理 UI，同时保留 V1 的 `/random`、本地/Hybrid、WebDAV 默认 90% 远程优先、缓存、importer 和 Backup / Restore。V2.2 继续兼容 V2.0 的 API 与数据库，重点改善管理网页、图片预览、目录整理和标签编辑体验。
 
 ## 发布状态（请先阅读）
 
-- **当前已发布版本**：V2.1.0，镜像为 `qinlingmonkey/random-image-api:v2`
-- **验收状态**：本地与远程隔离验收通过，完整测试为 `79 passed`
+- **当前候选版本**：V2.2.0；Docker Hub Registry 信息将在本轮发布完成后补录
+- **验收状态**：本地与远程隔离验收通过，完整测试为 `81 passed`
 - **平台**：`linux/amd64`
-- **Registry 摘要**：`sha256:d35f9c129d3c2119552b2b18877201125b224c4f918b0caee66ba1692d987a0e`
-- **对应 GitHub 功能提交**：`d637c4b6d8f444516a6084e571748a9ba3c692e1`
+- **Registry 摘要**：待本轮镜像推送后补录
+- **对应 GitHub 功能提交**：待本轮 Git commit 创建后补录
 - **兼容回滚版本**：`qinlingmonkey/random-image-api:v1`，继续保留且不会被 V2 覆盖
 
 V2 是 V1 的扩展：旧的 `/random`、`?type=`、本地图库和 WebDAV Hybrid 部署可以继续使用；升级前仍应先备份 SQLite 与永久图片。
@@ -163,7 +163,7 @@ data/images/mobile/
 data/images/square/
 ```
 
-服务按真实宽高判断方向。正方形图片从 V2.1 起保存到 `square/`；`SQUARE_POLICY` 只控制随机池归属。旧位置中的正方形图片继续兼容，不会自动迁移。V2 管理 UI 默认为：
+服务按真实宽高判断方向。正方形图片从 V2.2 起保存到 `square/`；`SQUARE_POLICY` 只控制随机池归属。旧位置中的正方形图片继续兼容，不会自动迁移。V2 管理 UI 默认为：
 
 ```text
 http://<主机>:10086/manage-images

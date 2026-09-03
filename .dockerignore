@@ -7,8 +7,13 @@ __pycache__
 .mypy_cache
 .ruff_cache
 .env
-backups
-data
+backups/
+data/
+# Keep generated exports, runtime caches, temporary uploads, and logs out of the image context.
+dist
+**/cache
+**/tmp
+**/*.log
 samples/_generated
 *.md
 tests

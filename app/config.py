@@ -160,7 +160,7 @@ class Settings(BaseSettings):
         return value
 
     @model_validator(mode="after")
-    def set_cache_dir(self) -> "Settings":
+    def set_runtime_paths(self) -> "Settings":
         if self.cache_dir is None:
             self.cache_dir = self.data_dir / "cache" / "webdav"
         if self.upload_tmp_dir is None:

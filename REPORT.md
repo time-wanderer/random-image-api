@@ -1,10 +1,10 @@
-# Random Image API V2.1 实施报告
+# Random Image API V2.2 实施报告
 
 ## 1. 报告范围
 
-本报告记录 Random Image API V2.1 文档与当前本地实现的状态。V2.1 保留 V1/V2 API、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、tags 和主题接口，重点优化管理 UI、图片预览、物理目录整理与标签编辑。
+本报告记录 Random Image API V2.2 文档与当前本地实现的状态。V2.2 保留 V1/V2 API、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、tags 和主题接口，重点优化管理 UI、图片预览、物理目录整理与标签编辑。
 
-V2.1.0 已通过本地与远程隔离验收，最终完整测试为 `79 passed`。功能提交 `d637c4b6d8f444516a6084e571748a9ba3c692e1` 已推送至 GitHub `main`；Docker Hub `qinlingmonkey/random-image-api:v2` 已更新为 V2.1.0。发布后 Registry 回读确认镜像为 `linux/amd64`，摘要为 `sha256:d35f9c129d3c2119552b2b18877201125b224c4f918b0caee66ba1692d987a0e`；`v1` 继续保留。
+V2.2.0 候选版本的本地完整测试为 `81 passed`。GitHub、Docker Hub 镜像 digest 与平台信息将在本轮发布完成后补录；`v1` 继续保留用于旧部署与回滚。
 
 ## 2. 信息来源与调研说明
 
@@ -80,9 +80,9 @@ Backup 保存本地永久图库、SQLite 一致性副本、公开模板和脱敏
 
 V1→V2 原地升级采用“先备份、停服务、替换源码、补充配置、Compose 重建、启动自动迁移、验收”的流程。跨 VPS 迁移采用源码 + 备份归档 + 私下保存配置三部分传输。
 
-### 4.6 V2.1 管理体验与目录整理
+### 4.6 V2.2 管理体验与目录整理
 
-V2.1 新增或完善：
+V2.2 新增或完善：
 
 - 响应式统计卡片、筛选表单和图片瀑布流；
 - 仅管理员签名会话可访问的本地图片与 WebDAV 缓存预览；
@@ -135,28 +135,28 @@ V2.1 新增或完善：
 - 定向读取当前 V2 源码、测试、Compose、公开环境模板及 Backup / Restore 脚本；
 - 文档完成后执行限定检查：四份已跟踪文档的 `git diff --check -- README.md MIGRATION.md REPORT.md DOCKERHUB_OVERVIEW.md` 返回 `0`；新建 `docs/V1.md` 使用 `git diff --no-index --check /dev/null docs/V1.md` 检查，无 whitespace 诊断（新文件存在差异时该命令按设计返回 `1`）。
 
-### 6.4 V2.1 本地与浏览器验证
+### 6.4 V2.2 本地与浏览器验证
 
 主线程已实际执行：
 
 - 管理端与 importer 专项测试：`24 passed`；
-- 最终完整测试：`pytest -q`，`79 passed`，仅有 Starlette TestClient 的 `httpx2` 迁移弃用警告；
+- 最终完整测试：`pytest -q`，`81 passed`，仅有 Starlette TestClient 的 `httpx2` 迁移弃用警告；
 - Python `compileall`、Shell 语法、`git diff --check`、Markdown 围栏、可提交文件 Secret 模式和运行数据跟踪检查均通过；
 - 新增回归覆盖管理员预览鉴权、图片瀑布流标记、预览 Content-Type 与缓存头、符号链接拒绝、Square 上传与 Restore 目录、移动时同名冲突、真实方向与存放目录分离、按钮删除确认、单图标签添加/移除、Catalog 立即刷新、WebDAV 标签添加/移除、已缓存预览和未缓存占位，以及 Docker ENTRYPOINT 可执行权限。
 
-V2.1 浏览器视觉检查使用 `/tmp` 全新数据目录、5 张隔离测试图和无头 Chromium 149 实际执行：管理员登录成功；桌面端按 CSS Columns 显示 4 列瀑布流；390×844 手机视口显示 1 列；本地图片预览、筛选区、真实方向、存放目录、Square 卡片和操作控件均渲染正常；两种视口都没有横向溢出。临时 Uvicorn、截图和 `/tmp` 数据已全部清理。
+本轮未执行浏览器视觉检查：当前浏览器无法访问远程隔离端口，因此未伪造截图或视觉结论。本轮改用远端 curl/HTML 合同检查，确认登录、CSRF、详情抽屉、Lightbox、批量选择、搜索排序、拖拽上传区、Square 目录、快捷菜单和标签工作台相关标记存在。
 
-### 6.5 V2.1 远程隔离 Docker 验收
+### 6.5 V2.2 远程隔离 Docker 验收
 
 主线程在测试 VPS 的全新 `/tmp` 目录、独立 Compose 项目、独立镜像标签和未占用高位端口中完成验收。测试前记录服务器原有容器快照；清理后原有 10 个容器的名称、镜像和状态与测试前一致，未停止、替换或修改任何既有业务容器、目录或数据。
 
 - 最终候选源码归档经清单与路径审计，共 42 个文件，不含 `.env`、Git 元数据、业务图片、数据库、日志、缓存、备份包或镜像归档；
-- Compose 配置渲染、Docker 构建和最终镜像内完整测试通过，最终镜像 ID 为 `sha256:036bd4609853103fd179c8f17c7cacf897d915a5b644851a4663c7cabfdfe827`；
-- 镜像内完整测试为 `79 passed`，生产镜像内容在一次性测试容器运行前后保持不变；
-- Compose 容器达到 `healthy`，`/health` 返回版本 `2.1.0`，Uvicorn PID 1 以 UID `1000` 运行，SQLite `PRAGMA integrity_check=ok`；
+- Compose 配置与 Docker 构建通过；候选镜像 ID 为 `sha256:baf37872c6702d361fc94bc19be639a1b7187a265cae950e4f7bf69cfd509a7f`。生产镜像未包含 pytest；两次在临时容器中在线安装开发依赖均未产生可完成的结果，因此不宣称远端镜像内 pytest 通过。
+- 本地完整测试为 `81 passed`；远端使用版本号更新前构建的正式候选镜像完成运行时与 API 验收，测试镜像内容未被修改；
+- Compose 容器达到 `healthy`，`/health` 返回版本 `2.1.0`（远端镜像构建早于本地版本号更新；因此本轮未对 V2.2.0 版本元数据做远端镜像验收），Uvicorn PID 1 以 UID `1000` 运行，SQLite `PRAGMA integrity_check=ok`；
 - 真实 HTTP 管理流程通过：未登录预览拒绝、登录与 CSRF、Square 上传到 `square/`、瀑布流卡片、受保护 PNG 预览、单图标签添加/移除、`desktop↔square` 移动且真实方向保持 Square、主题随机接口、缺少确认的删除拒绝以及 `confirm=1` 友好删除；
 - Backup/Restore 通过：备份包含 Square 原图和 SQLite 标签关系，不包含 WebDAV 缓存或测试 Secret；停止服务后恢复成功，恢复前后图片 ID、Square 路径、真实方向和主题关系一致，恢复后的主题接口返回可解码 PNG；
-- 本轮隔离容器、Compose 网络、源码目录与临时归档均已删除；仅保留经过验收的独立镜像用于发布，发布后再删除。
+- 本轮隔离容器、Compose 网络、源码目录、临时归档和临时凭据均已清理；远端原有容器快照前后 `cmp` 完全一致。
 
 远程验收实际发现并修复两个发布阻断问题：
 
@@ -165,7 +165,7 @@ V2.1 浏览器视觉检查使用 `/tmp` 全新数据目录、5 张隔离测试�
 
 ### 6.6 V2.0 已发布版本的历史验收
 
-以下记录属于已发布 V2.0.0，作为 V2.1 验收前的历史基线：
+以下记录属于已发布 V2.0.0，作为 V2.2 验收前的历史基线：
 
 主线程已实际执行并通过：
 
@@ -197,6 +197,14 @@ V2.1 浏览器视觉检查使用 `/tmp` 全新数据目录、5 张隔离测试�
 2. 网页上传先扫描文件、后写标签，成功路径没有在标签事务提交后再次刷新 Catalog，导致 SQLite 已有标签但主题 API 暂时返回 404。修复为标签提交后重新扫描，并增加上传及归档后的内存主题索引回归断言。
 
 GitHub `main` 已同步 V2 源码提交 `304d5ff48dd6f82904066dd54aa436d651a997d5`。同一远程验收镜像已发布为 `qinlingmonkey/random-image-api:v2`；发布后通过 Docker Registry API 独立回读 manifest 和配置 Blob，确认摘要为 `sha256:22097fbcb95a953c99a4c32a4c0381bfdc817bc25e6e2825272694a1d9d126cb`、配置摘要为 `sha256:911fd314b95b6227a24f2100246d63cf0d1cdb29a7e46128fdab3a8c61e73357`、平台为 `linux/amd64`、共 10 层。
+
+## 7. 本轮发布阻塞与实际结果
+
+- 本地最终 `pytest -q`：`81 passed`，退出码 `0`；`compileall`、Shell 语法和 `git diff --check` 均通过。
+- 远程隔离 Compose 构建、healthy、SQLite、UID 1000、HTTP、登录/CSRF、上传、UI HTML 合同、Backup/Restore 均通过。
+- 本轮远程无法使用浏览器访问隔离端口，因此未执行视觉验收。
+- 本地未配置可安全使用的 GitHub 凭据、Docker Hub 凭据或 Docker daemon；因此未推送 GitHub、未推送 Docker Hub，也未能回读新的 Registry digest。
+- 代码与文档已更新为 V2.2.0 候选状态；推送和 digest 待具备安全凭据与构建环境后补录。
 
 ## 7. 已解决问题
 

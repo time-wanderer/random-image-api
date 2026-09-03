@@ -562,3 +562,133 @@ def test_v21_webdav_tag_edit_cached_preview_and_uncached_placeholder(admin_env) 
                 "SELECT 1 FROM webdav_object_tags WHERE href=? AND tag_id=?",
                 (cached_href, tag_id),
             ).fetchone() is None
+
+
+def test_v21_tag_errors_and_empty_state_are_safe(admin_env) -> None:
+    settings, app = admin_env
+    with new_client(app) as client:
+        csrf = login(client)
+        overview = client.get(ADMIN)
+        assert "当前还没有标签，请先创建标签" in overview.text
+        assert "创建第一个标签" in overview.text
+
+        invalid = client.post(
+            f"{ADMIN}/tags",
+            data={"csrf": csrf, "slug": "BAD SLUG", "display_name": "坏标签"},
+        )
+        assert invalid.status_code == 400
+        assert "创建标签失败" in invalid.text
+        assert "Internal Server Error" not in invalid.text
+
+        assert client.post(
+            f"{ADMIN}/tags",
+            data={"csrf": csrf, "slug": "safe-tag", "display_name": "安全标签"},
+            follow_redirects=False,
+        ).status_code == 303
+        page = client.get(f"{ADMIN}/images?source=local")
+        assert "安全标签 — safe-tag" in page.text
+
+        empty_single = client.post(
+            f"{ADMIN}/images/999/tags",
+            data={"csrf": csrf, "tag_id": "", "action": "add"},
+        )
+        assert empty_single.status_code == 400
+        assert "未选择标签" in empty_single.text
+        assert "Traceback" not in empty_single.text
+
+        empty_batch = client.post(
+            f"{ADMIN}/images/tags",
+            data={"csrf": csrf, "image_ids": "999", "tag_id": "", "action": "add"},
+        )
+        assert empty_batch.status_code == 400
+        assert "未选择标签" in empty_batch.text
+
+        uploaded = client.post(
+            f"{ADMIN}/upload",
+            data={"csrf": csrf},
+            files={"file": ("safe.png", image_bytes(), "image/png")},
+            follow_redirects=False,
+        )
+        assert uploaded.status_code == 303
+        with db.get_conn(settings.database_path) as conn:
+            image_id = int(conn.execute("SELECT id FROM images").fetchone()[0])
+
+        disabled = client.post(
+            f"{ADMIN}/tags/1/disable",
+            data={"csrf": csrf, "enabled": "0"},
+            follow_redirects=False,
+        )
+        assert disabled.status_code == 303
+        disabled_tag = client.post(
+            f"{ADMIN}/images/{image_id}/tags",
+            data={"csrf": csrf, "tag_id": "1", "action": "add"},
+        )
+        assert disabled_tag.status_code == 404
+        assert "标签不存在或已禁用" in disabled_tag.text
+
+        empty_webdav = client.post(
+            f"{ADMIN}/webdav/tags",
+            data={"csrf": csrf, "href": "/missing", "tag_id": "", "action": "add"},
+        )
+        assert empty_webdav.status_code == 400
+        assert "未选择标签" in empty_webdav.text
+
+
+def test_admin_ux_information_architecture_and_responsive_contract(admin_env) -> None:
+    settings, app = admin_env
+    with new_client(app) as client:
+        csrf = login(client)
+        overview = client.get(ADMIN).text
+        assert all(text in overview for text in ("开始使用", "创建标签", "上传 / 导入", "浏览并调用 API", "上传图片", "归档导入", "WebDAV 与缓存"))
+        assert "source=local" in overview and "source=webdav" in overview
+        assert "input type=\"file\"" in overview
+
+        assert client.post(f"{ADMIN}/tags", data={"csrf": csrf, "slug": "summer", "display_name": "夏日"}, follow_redirects=False).status_code == 303
+        tags = client.get(f"{ADMIN}/tags").text
+        assert all(text in tags for text in ("标签工作台", "显示名称给人看，slug 给 API 用", "本地关联", "WebDAV 关联", "编辑、启停或合并", "保存编辑", "停用标签", "合并并删除源标签"))
+        assert "enabled=1" not in tags
+
+        uploaded = client.post(
+            f"{ADMIN}/upload",
+            data={"csrf": csrf},
+            files={"file": ("ux-contract.png", image_bytes(), "image/png")},
+            follow_redirects=False,
+        )
+        assert uploaded.status_code == 303
+
+        images = client.get(f"{ADMIN}/images?source=local").text
+        assert all(text in images for text in ("快速筛选", "高级筛选", "真实方向", "存放目录", "筛选结果", "危险"))
+        assert "@media(max-width:760px)" in images
+        assert ".stats,.steps,.workspace-grid,form.filters,.form-grid{grid-template-columns:1fr;min-width:0}" in images
+        assert "white-space:nowrap" in images
+        assert "word-break:keep-all" in images
+        assert "overflow-x:auto" in images
+        assert "overflow-x:hidden" in images
+        assert "nav.main-nav{flex-wrap:nowrap;overflow-x:auto" in images
+        assert all(text in images for text in ("主导航", "总览", "图片库", "标签工作台", "退出", "快速筛选", "高级筛选", "batch-tags", "name=\"tag_id\"", "name=\"q\""))
+        assert "确定删除本地原图？此操作不可撤销。" in images
+        assert all(text in overview for text in ("主导航", "总览", "图片库", "标签工作台", "退出", "id=\"upload\"", "name=\"files\"", "name=\"archive\""))
+        assert all(text in tags for text in ("主导航", "总览", "图片库", "标签工作台", "退出", "id=\"create-tag\"", "name=\"display_name\"", "name=\"slug\""))
+
+        # 图片库产品化布局契约：宽屏网格、完整比例预览、管理入口与危险区。
+        assert "grid-template-columns: repeat(auto-fill, minmax(260px, 1fr))" in images
+        assert "aspect-ratio: 4 / 3" in images
+        assert "object-fit: contain" in images
+        assert ".preview-frame" in images and ".preview-overlay" in images
+        assert ".card-action-group" in images and "管理此图片" in images
+        assert ".tags-label" in images and ".badge" in images
+        assert ".card-action-group.danger-zone" in images
+        assert "@media(max-width:390px)" in images
+        assert ".grid { grid-template-columns: 1fr; }" in images
+        assert "请选择图片" in images
+        assert "count?'已选择 '+count+' 张图片':'请选择图片'" in images
+        assert 'onsubmit="return confirm(' in images
+        assert 'name="confirm" value="1"' in images
+        assert 'name="target" required' in images
+        assert 'data-batch-image form="batch-tags" name="image_ids"' in images
+        assert "function refreshBatchSelection()" in images
+        assert "document.querySelectorAll('[data-batch-image]:checked')" in images
+        assert "document.addEventListener('DOMContentLoaded',function(){" in images
+        assert "if(e.target.matches('[data-batch-image]'))refreshBatchSelection()" in images
+        assert "document.querySelectorAll('[data-batch-image]').forEach(function(x){x.checked=checked;});refreshBatchSelection();" in images
+        assert "if(bar)bar.hidden=!count" in images

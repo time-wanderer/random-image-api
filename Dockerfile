@@ -24,6 +24,10 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY --chown=appuser:appuser app /app/app
+# Keep migration helpers and the exact build recipe available in exported images.
+# Runtime data, credentials, tests, and documentation remain excluded by .dockerignore.
+COPY --chown=appuser:appuser Dockerfile /app/Dockerfile
+COPY --chmod=0755 scripts/restore.sh /app/scripts/restore.sh
 COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

@@ -1,8 +1,8 @@
-# Random Image API V2.1 迁移手册
+# Random Image API V2.2 迁移手册
 
-本文覆盖三类迁移：V1→V2 原地升级、V2.0→V2.1 兼容升级，以及把 V2 连同永久数据迁移到新 VPS。V2.1 不改变 API 和 SQLite schema，重点增加响应式图片管理、独立 `square/` 目录、图片移动归档和更完整的标签编辑。
+本文覆盖三类迁移：V1→V2 原地升级、V2.0→V2.2 兼容升级，以及把 V2 连同永久数据迁移到新 VPS。V2.2 不改变 API 和 SQLite schema，重点增加响应式图片管理、独立 `square/` 目录、图片移动归档和更完整的标签编辑。
 
-> V2.1.0 已通过本地与远程隔离验收（完整测试 `79 passed`），并已发布到 GitHub `main` 和 Docker Hub `qinlingmonkey/random-image-api:v2`。当前镜像为 `linux/amd64`，Registry 摘要为 `sha256:d35f9c129d3c2119552b2b18877201125b224c4f918b0caee66ba1692d987a0e`；`v1` 继续保留用于旧部署与回滚。
+> V2.2.0 当前为 V2.2.0 候选版本；GitHub 与 Docker Hub 的最终提交和 Registry 摘要将在本轮发布完成后补录。
 
 ## 1. 数据边界
 
@@ -71,11 +71,11 @@ V2 首次连接旧 SQLite 时会幂等执行：
 
 旧图片默认仍是未打标签状态：`GET /random` 行为不变；只有关联标签后才会进入 `/random/{slug}` 或 `?tag=` 的主题结果。重复启动不会重复破坏数据。
 
-### 2.4 V2.0→V2.1 兼容升级
+### 2.4 V2.0→V2.2 兼容升级
 
-V2.1 沿用 schema version 2，不需要单独执行数据库迁移。升级前仍应运行 `./scripts/backup.sh`，然后拉取通过验收的新镜像并重建服务。
+V2.2 沿用 schema version 2，不需要单独执行数据库迁移。升级前仍应运行 `./scripts/backup.sh`，然后拉取通过验收的新镜像并重建服务。
 
-V2.1 启动时会自动创建：
+V2.2 启动时会自动创建：
 
 ```text
 data/images/square/
