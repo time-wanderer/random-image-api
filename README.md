@@ -38,12 +38,13 @@ Client
 
 ### 3.1 使用 Docker Hub 镜像
 
-创建项目目录和持久化目录：
+创建项目目录，并下载仓库提供的完整配置模板：
 
 ```bash
-mkdir -p random-image-api/data/{images/desktop,images/mobile,images/square,database,logs,cache/webdav,tmp/admin}
+mkdir -p random-image-api
 cd random-image-api
-sudo chown -R 1000:1000 data
+curl -fsSLO https://raw.githubusercontent.com/time-wanderer/random-image-api/main/.env.example
+cp .env.example .env
 ```
 
 创建 `compose.yml`：
@@ -67,18 +68,19 @@ services:
       start_period: 15s
 ```
 
-创建 `.env`。两个 Secret 必须分别随机生成：
+`.env.example` 是完整配置模板，已经预先写入端口、管理页面、Local/WebDAV、缓存、扫描、归档限制和所有管理参数。默认 `STORAGE_MODE=local`，因此不填写 WebDAV 账号也可以直接启动。
+
+只需生成两个不同的管理 Secret 并写入 `.env`：
 
 ```bash
-cat > .env <<EOF
-APP_PORT=10086
-ADMIN_PATH=/manage-images
-ADMIN_TOKEN=$(openssl rand -hex 32)
-ADMIN_SESSION_SECRET=$(openssl rand -hex 32)
-ADMIN_COOKIE_SECURE=false
-STORAGE_MODE=local
-EOF
+sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=v2/" .env
+sed -i "s/^IMAGE_NAME=.*/IMAGE_NAME=qinlingmonkey\\/random-image-api/" .env
+sed -i "s/^ADMIN_TOKEN=.*/ADMIN_TOKEN=$(openssl rand -hex 32)/" .env
+sed -i "s/^ADMIN_SESSION_SECRET=.*/ADMIN_SESSION_SECRET=$(openssl rand -hex 32)/" .env
 chmod 600 .env
+
+mkdir -p data/images/{desktop,mobile,square} data/database data/cache/webdav data/logs data/tmp/admin
+sudo chown -R 1000:1000 data
 
 docker compose pull
 docker compose up -d
@@ -86,15 +88,44 @@ docker compose ps
 curl -fsS http://127.0.0.1:10086/health
 ```
 
-直接通过 HTTP 访问时可暂用 `ADMIN_COOKIE_SECURE=false`；生产环境应放在 HTTPS 反向代理后并改为 `true`。默认管理入口是 `http://服务器地址:10086/manage-images/login`。自定义路径不能替代 Token、Session Cookie 和 CSRF 防护。
+直接通过 HTTP 访问时使用 `ADMIN_COOKIE_SECURE=false`；生产环境放在 HTTPS 反向代理后时改为 `true`。默认管理入口是 `http://服务器地址:10086/manage-images/login`。自定义路径不能替代 Token、Session Cookie 和 CSRF 防护。
+
+### 3.1.1 启用 WebDAV
+
+不需要重新编写配置文件，只需编辑服务器上的 `.env`，切换模式并填写 WebDAV 必要信息：
+
+```bash
+sed -i 's/^STORAGE_MODE=.*/STORAGE_MODE=hybrid/' .env
+vi .env
+```
+
+至少填写以下字段：
+
+```env
+STORAGE_MODE=hybrid
+WEBDAV_BASE_URL=https://dav.example.com/remote.php/dav/files/user/
+WEBDAV_ALLOWED_HOSTS=dav.example.com
+WEBDAV_USERNAME=your-webdav-user
+WEBDAV_PASSWORD=your-webdav-password
+```
+
+`WEBDAV_DESKTOP_ROOT` 和 `WEBDAV_MOBILE_ROOT` 已有 `/desktop/`、`/mobile/` 默认值，通常无需修改。保存后执行：
+
+```bash
+docker compose up -d --force-recreate
+curl -fsS http://127.0.0.1:10086/health
+```
+
+WebDAV 密码只保存在服务器 `.env`，不要提交到 GitHub、备份或 Docker Hub。
 
 ### 3.2 从源码构建
 
 ```bash
+git clone https://github.com/time-wanderer/random-image-api.git
+cd random-image-api
 cp .env.example .env
-# 生成管理令牌与管理会话密钥，分别写入 .env 对应字段
-openssl rand -hex 32
-openssl rand -hex 32
+sed -i "s/^ADMIN_TOKEN=.*/ADMIN_TOKEN=$(openssl rand -hex 32)/" .env
+sed -i "s/^ADMIN_SESSION_SECRET=.*/ADMIN_SESSION_SECRET=$(openssl rand -hex 32)/" .env
 chmod 600 .env
 
 docker compose build
@@ -103,7 +134,7 @@ docker compose ps
 curl -fsS http://127.0.0.1:10086/health
 ```
 
-请把第二个生成值写入 `ADMIN_SESSION_SECRET`。`.env.example` 已提供该变量名；不要把真实值提交到 Git。Compose 将 `./data` 挂载到 `/app/data`，所有重要数据保留在宿主机。
+GitHub 只提供模板，不保存真实 Secret。Compose 将 `./data` 挂载到 `/app/data`，所有重要数据保留在宿主机。
 
 常用操作：
 

@@ -15,15 +15,16 @@ V2 是 V1 的扩展：旧的 `/random`、`?type=`、本地图库和 WebDAV Hybri
 
 ## 1. 使用 V2 镜像快速部署
 
-创建持久化目录：
+创建项目目录，并下载仓库提供的完整环境配置模板：
 
 ```bash
-mkdir -p random-image-api/data/{images/desktop,images/mobile,images/square,database,cache/webdav,logs,tmp/admin}
+mkdir -p random-image-api
 cd random-image-api
-sudo chown -R 1000:1000 data
+curl -fsSLO https://raw.githubusercontent.com/time-wanderer/random-image-api/main/.env.example
+cp .env.example .env
 ```
 
-创建 `compose.yml`：
+创建仅使用预构建镜像的 `compose.yml`：
 
 ```yaml
 services:
@@ -44,18 +45,19 @@ services:
       start_period: 15s
 ```
 
-创建 `.env`，管理 Token 与会话密钥必须分别随机生成：
+`.env.example` 是完整配置模板，已经包含端口、管理页面、Local/WebDAV、缓存、扫描、归档限制和管理参数。默认 `STORAGE_MODE=local`，不填写 WebDAV 账号也可以启动。
+
+只需把模板设置为镜像部署，并生成两个不同的管理 Secret：
 
 ```bash
-cat > .env <<EOF
-APP_PORT=10086
-ADMIN_PATH=/manage-images
-ADMIN_TOKEN=$(openssl rand -hex 32)
-ADMIN_SESSION_SECRET=$(openssl rand -hex 32)
-ADMIN_COOKIE_SECURE=false
-STORAGE_MODE=local
-EOF
+sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=v2/" .env
+sed -i "s/^IMAGE_NAME=.*/IMAGE_NAME=qinlingmonkey\\/random-image-api/" .env
+sed -i "s/^ADMIN_TOKEN=.*/ADMIN_TOKEN=$(openssl rand -hex 32)/" .env
+sed -i "s/^ADMIN_SESSION_SECRET=.*/ADMIN_SESSION_SECRET=$(openssl rand -hex 32)/" .env
 chmod 600 .env
+
+mkdir -p data/images/{desktop,mobile,square} data/database data/cache/webdav data/logs data/tmp/admin
+sudo chown -R 1000:1000 data
 
 docker compose pull
 docker compose up -d
@@ -70,6 +72,34 @@ http://<主机>:10086/manage-images/login
 ```
 
 直接通过 HTTP 测试时可使用 `ADMIN_COOKIE_SECURE=false`；生产环境应配置 HTTPS 反向代理并改为 `true`。仅修改 `ADMIN_PATH` 不能替代 Token、Session Cookie 与 CSRF 防护。
+
+### 1.1 按需启用 WebDAV
+
+完整 `.env.example` 已预先包含 WebDAV 配置。默认 `STORAGE_MODE=local`，不会连接 WebDAV；需要时只需切换模式并填写服务信息：
+
+```bash
+sed -i 's/^STORAGE_MODE=.*/STORAGE_MODE=hybrid/' .env
+vi .env
+```
+
+至少设置：
+
+```env
+STORAGE_MODE=hybrid
+WEBDAV_BASE_URL=https://dav.example.com/remote.php/dav/files/user/
+WEBDAV_ALLOWED_HOSTS=dav.example.com
+WEBDAV_USERNAME=your-webdav-user
+WEBDAV_PASSWORD=your-webdav-password
+```
+
+`WEBDAV_DESKTOP_ROOT` 和 `WEBDAV_MOBILE_ROOT` 默认分别为 `/desktop/`、`/mobile/`，通常无需修改。保存后重建容器：
+
+```bash
+docker compose up -d --force-recreate
+curl -fsS http://127.0.0.1:10086/health
+```
+
+WebDAV 密码只保存在服务器 `.env`，不要提交到 GitHub、备份或 Docker Hub。
 
 ## 2. 可选：从源码构建 V2
 
