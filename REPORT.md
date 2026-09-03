@@ -151,9 +151,9 @@ V2.2 新增或完善：
 主线程在测试 VPS 的全新 `/tmp` 目录、独立 Compose 项目、独立镜像标签和未占用高位端口中完成验收。测试前记录服务器原有容器快照；清理后原有 10 个容器的名称、镜像和状态与测试前一致，未停止、替换或修改任何既有业务容器、目录或数据。
 
 - 最终候选源码归档经清单与路径审计，共 42 个文件，不含 `.env`、Git 元数据、业务图片、数据库、日志、缓存、备份包或镜像归档；
-- Compose 配置与 Docker 构建通过；候选镜像 ID 为 `sha256:baf37872c6702d361fc94bc19be639a1b7187a265cae950e4f7bf69cfd509a7f`。生产镜像未包含 pytest；两次在临时容器中在线安装开发依赖均未产生可完成的结果，因此不宣称远端镜像内 pytest 通过。
-- 本地完整测试为 `81 passed`；远端使用版本号更新前构建的正式候选镜像完成运行时与 API 验收，测试镜像内容未被修改；
-- Compose 容器达到 `healthy`，`/health` 返回版本 `2.1.0`（远端镜像构建早于本地版本号更新；因此本轮未对 V2.2.0 版本元数据做远端镜像验收），Uvicorn PID 1 以 UID `1000` 运行，SQLite `PRAGMA integrity_check=ok`；
+- Compose 配置与 Docker 构建通过；V2.2.0 正式候选镜像 ID 为 `sha256:9cad79d94a1cd902a4ede2a08d19461079be821c95ad375f8a499de2595a09e8`。通过一次性 root 验证容器复制源码并安装开发依赖后，正式镜像上的完整测试通过。
+- 本地完整测试为 `81 passed`；正式 V2.2.0 候选镜像内完整测试为 `81 passed`，并通过 compileall 与 Shell 语法检查；测试容器为一次性容器，未修改正式镜像内容。
+- Compose 容器达到 `healthy`，`/health` 返回版本 `2.2.0`，Uvicorn PID 1 以 UID `1000` 运行，SQLite `PRAGMA integrity_check=ok`；
 - 真实 HTTP 管理流程通过：未登录预览拒绝、登录与 CSRF、Square 上传到 `square/`、瀑布流卡片、受保护 PNG 预览、单图标签添加/移除、`desktop↔square` 移动且真实方向保持 Square、主题随机接口、缺少确认的删除拒绝以及 `confirm=1` 友好删除；
 - Backup/Restore 通过：备份包含 Square 原图和 SQLite 标签关系，不包含 WebDAV 缓存或测试 Secret；停止服务后恢复成功，恢复前后图片 ID、Square 路径、真实方向和主题关系一致，恢复后的主题接口返回可解码 PNG；
 - 本轮隔离容器、Compose 网络、源码目录、临时归档和临时凭据均已清理；远端原有容器快照前后 `cmp` 完全一致。
