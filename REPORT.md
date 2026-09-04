@@ -2,9 +2,9 @@
 
 ## 1. 报告范围
 
-本报告记录 Random Image API V2.2 文档与当前本地实现的状态。V2.2 保留 V1/V2 API、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、tags 和主题接口，重点优化管理 UI、图片预览、物理目录整理与标签编辑。
+本报告记录 Random Image API V2.2 文档与当前本地实现的状态。当前本地发布候选版本为 V2.2.1；V2.2 保留 V1/V2 API、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、tags 和主题接口，重点优化管理 UI、图片预览、物理目录整理与标签编辑。
 
-V2.2.0 的本地与远程候选镜像完整测试均为 `81 passed`。源码已发布至 GitHub `main`，Docker Hub 镜像 `qinlingmonkey/random-image-api:v2` 已发布为 `linux/amd64`；Registry 摘要为 `sha256:268860bd1cb046f9a7f9f34dfc6ec6396e5748993f67d91cd202032f2189e490`，`v1` 继续保留用于旧部署与回滚。
+V2.2.1 本地与远程一次性测试容器的完整测试均为 `83 passed`，候选镜像隔离构建、运行及真实 HTTP/HTML 管理流程验收通过。本次文档收尾未提交、推送、远程连接或发布；V2.2.1 的 Registry/Config 摘要必须在正式发布并回读 Registry 后补录。V2.2.0 已发布镜像的历史 Registry 摘要为 `sha256:268860bd1cb046f9a7f9f34dfc6ec6396e5748993f67d91cd202032f2189e490`，不得作为 V2.2.1 摘要；`v1` 继续保留用于旧部署与回滚。
 
 ## 2. 信息来源与调研说明
 
@@ -63,7 +63,7 @@ V2 可把 `desktop/`、`mobile/` 下第一层目录作为主题提示并写入�
 
 管理 UI 支持：
 
-- 图片分页、方向/来源/缓存/启用状态/标签筛选；
+- 图片分页、方向/来源/缓存/启用状态/标签筛选；标签筛选提供“全部标签”“无标签”和用户创建标签；
 - 标签创建、编辑、启停和合并；
 - 图片多标签批量关联；
 - 多文件上传、真实格式/方向识别、像素和大小限制、哈希去重；
@@ -91,7 +91,7 @@ V2.2 新增或完善：
 - 上传与 importer 将正方形图片保存到独立 `data/images/square/`，`SQUARE_POLICY` 只控制随机池；
 - 删除改为按钮二次确认，服务端仍校验 CSRF 与明确确认字段；
 - 单张及批量本地图片标签添加/移除，以及 WebDAV 对象标签添加/移除；
-- 来源、真实方向、存放目录、启用、缓存、标签和文件名/HREF 筛选。
+- 来源、真实方向、存放目录、启用、缓存、标签和文件名/HREF 筛选；“无标签”表示不存在任何标签关系，关联停用标签的图片不算无标签，并可与其他筛选、排序和分页组合。
 
 预览路径只由数据库 ID 或精确 HREF 解析，执行登录校验、参数化查询、路径 containment 与符号链接拒绝。移动使用同文件系统 `os.replace`，数据库失败时回移；删除先把文件原子移动至隔离名称，数据库事务失败时恢复。WebDAV 不提供远程删除。
 
@@ -106,6 +106,9 @@ V2.2 新增或完善：
 | `REPORT.md` | 真实记录本地来源、方案、测试状态、风险与待执行验收 |
 | `DOCKERHUB_OVERVIEW.md` | 以 V2 为主教程，提供镜像部署、管理 UI、主题 API、WebDAV、备份恢复，并保留 V1 回滚说明 |
 | `docs/V1.md` | 从提交 `8235e19` 提炼简洁 V1 快照，未长篇复制原文 |
+| `app/__init__.py` | 将补丁版本更新为 `2.2.1` |
+| `app/admin.py` | 增加本地与 WebDAV 管理图片页的“无标签”筛选及状态说明 |
+| `tests/test_api.py`、`tests/test_admin.py` | 增加版本与无标签筛选回归覆盖 |
 
 本次已修改应用源码、测试、公开环境模板、部署文件、恢复脚本与文档；未读取或修改现有 `.env`、业务图片/数据库/日志、`backups`、`dist` 或 `.a0proj`。
 
@@ -145,6 +148,20 @@ V2.2 新增或完善：
 - 新增回归覆盖管理员预览鉴权、图片瀑布流标记、预览 Content-Type 与缓存头、符号链接拒绝、Square 上传与 Restore 目录、移动时同名冲突、真实方向与存放目录分离、按钮删除确认、单图标签添加/移除、Catalog 立即刷新、WebDAV 标签添加/移除、已缓存预览和未缓存占位，以及 Docker ENTRYPOINT 可执行权限。
 
 本轮未执行浏览器视觉检查：当前浏览器无法访问远程隔离端口，因此未伪造截图或视觉结论。本轮改用远端 curl/HTML 合同检查，确认登录、CSRF、详情抽屉、Lightbox、批量选择、搜索排序、拖拽上传区、Square 目录、快捷菜单和标签工作台相关标记存在。
+
+### 6.4.1 V2.2.1 无标签筛选发布收尾
+
+- 管理图片页新增稳定值 `__untagged__`，本地图片和 WebDAV 对象均通过参数化查询中的固定 `NOT EXISTS` 条件判断不存在任何标签关系；
+- 关联停用标签的图片不算无标签；无标签可与来源、方向、存放目录、启用/缓存状态、文件名/HREF 搜索、排序和分页组合；
+- 筛选项、刷新/分页选中状态、当前条件摘要、专属空状态及 SQL 注入式输入均有回归测试；
+- 本地与远程一次性测试容器完整 `pytest -q` 均为 `83 passed`。生产镜像按精简设计只安装 `requirements.txt` 中的运行依赖，不内置 `pytest`；远程测试由一次性测试容器另行提供 `requirements-dev.txt` 中的开发测试依赖；
+- 生产镜像显式设置 `CACHE_DIR=/app/data/cache/webdav`。运行完整测试时对 pytest 进程使用 `env -u CACHE_DIR`，是为了避免生产默认值覆盖配置测试的未配置场景，使其能够验证缓存目录随临时 `DATA_DIR` 派生；该操作只隔离测试进程环境，不改变候选镜像的正式运行配置；
+- 候选镜像构建成功，应用版本为 `2.2.1`；隔离运行中 `/health` 正常，主进程 UID 为 `1000`，未登录访问返回 `401`，登录和 CSRF 流程通过；
+- 真实 PNG 上传后可由“无标签”筛选命中；创建并关联标签后，该图片从无标签结果移除，SQLite 标签关系与页面结果一致；
+- 按正式 `data` 布局执行的 Backup 内容检查与配置脱敏通过；原有容器快照前后一致，隔离容器、候选镜像和临时目录均已清理；
+- 本轮仅执行真实 HTTP/HTML 管理流程验收，未执行浏览器视觉验收，不据此声称视觉验收通过；
+- 远程测试复用既有长期 SSH 密钥并按约定保留，未因本轮清理撤销或删除；
+- 当前 Python `compileall`、tracked Shell 语法、`git diff --check`、Markdown 围栏与 Secret 扫描均通过；本次文档收尾未提交、推送、远程连接或发布，V2.2.1 镜像摘要仍待正式发布并回读 Registry 后补录。
 
 ### 6.5 V2.2 远程隔离 Docker 验收
 
@@ -198,9 +215,9 @@ V2.2 新增或完善：
 
 GitHub `main` 已同步 V2 源码提交 `304d5ff48dd6f82904066dd54aa436d651a997d5`。同一远程验收镜像已发布为 `qinlingmonkey/random-image-api:v2`；发布后通过 Docker Registry API 独立回读 manifest 和配置 Blob，确认摘要为 `sha256:22097fbcb95a953c99a4c32a4c0381bfdc817bc25e6e2825272694a1d9d126cb`、配置摘要为 `sha256:911fd314b95b6227a24f2100246d63cf0d1cdb29a7e46128fdab3a8c61e73357`、平台为 `linux/amd64`、共 10 层。
 
-## 7. 本轮发布与实际结果
+## 7. V2.2.0 历史发布与实际结果
 
-- 本地最终 `pytest -q`：`81 passed`，退出码 `0`；`compileall`、Shell 语法和 `git diff --check` 均通过。
+- V2.2.0 本地最终 `pytest -q`：`81 passed`，退出码 `0`；`compileall`、Shell 语法和 `git diff --check` 均通过。
 - 远程隔离 Compose 构建、healthy、SQLite、UID 1000、HTTP、登录/CSRF、上传、UI HTML 合同、Backup/Restore 均通过。
 - 本轮远程无法使用浏览器访问隔离端口，因此未执行远程视觉验收；使用真实 HTTP 管理流程和 HTML 合同检查替代，未伪造截图结论。
 - GitHub `main` 已同步 V2.2 功能与验收提交 `384a155290c69dbd65dda08d2d374dccc2f2a7e7`。

@@ -2,7 +2,7 @@
 
 Random Image API V2 是 V1 的**向后兼容扩展**：保留 V1 的 `GET /random`、`?type=`、本地图库、WebDAV Hybrid、默认 90% 远程优先、缓存、归档 importer、Backup / Restore，并新增主题标签和安全管理 UI。V2.2 在不改变 API 和数据库 schema 的前提下，重点优化管理网页与本地图片整理体验。
 
-> 当前版本：V2.2.0。源码已发布至 GitHub `main`，Docker 镜像为 `qinlingmonkey/random-image-api:v2`（`linux/amd64`），Registry 摘要为 `sha256:268860bd1cb046f9a7f9f34dfc6ec6396e5748993f67d91cd202032f2189e490`。`v1` 继续保留用于旧部署与回滚。
+> 当前版本：V2.2.1（本地发布候选，尚未提交或发布）。`qinlingmonkey/random-image-api:v2` 的 V2.2.1 Registry/Config 摘要须在正式发布并回读 Registry 后补录。V2.2.0 历史 Registry 摘要为 `sha256:268860bd1cb046f9a7f9f34dfc6ec6396e5748993f67d91cd202032f2189e490`，不得作为 V2.2.1 摘要；`v1` 继续保留用于旧部署与回滚。
 
 V1 快照见 [docs/V1.md](docs/V1.md)，V1 原地升级和 VPS 迁移见 [MIGRATION.md](MIGRATION.md)。
 
@@ -294,7 +294,7 @@ ADMIN_PAGE_SIZE=20
 4. **上传**：支持单图和多图上传，验证格式、像素和大小，按内容哈希去重，并按真实方向保存；正方形图片进入 `square/`。
 5. **删除**：点击“删除本地原图”后由浏览器二次确认，页面不再要求手写 `DELETE`；服务端仍要求明确确认字段和 CSRF。WebDAV 只允许禁用、维护标签或清理本地缓存，绝不远程删除原图。
 6. **WebDAV 预览**：已有本地缓存的远端对象可以预览；未缓存对象显示占位卡片，打开管理页不会批量下载远端原图。
-7. **筛选**：可按来源、真实方向、存放目录、启用状态、缓存状态、标签和文件名/HREF 筛选，并选择每页数量。
+7. **筛选**：可按来源、真实方向、存放目录、启用状态、缓存状态、标签和文件名/HREF 筛选，并选择每页数量。标签筛选提供“全部标签”“无标签”和用户创建标签；“无标签”表示不存在任何标签关系，因此关联了停用标签的图片不算无标签，并可与其他筛选、排序和分页组合。
 8. **缓存**：可运行维护或清空 WebDAV 缓存；缓存可重建，不是永久图库。
 9. **归档**：先上传到 preview，系统执行完整安全校验和 dry-run；核对摘要、默认标签及第一层目录映射后再 confirm。preview 绑定当前会话、有 TTL，登出、过期或服务重启后不能确认。
 
@@ -345,5 +345,9 @@ python -m pytest
 python -m compileall -q app tests
 bash -n scripts/*.sh docker-entrypoint.sh
 ```
+
+V2.2.1 本地及远程一次性测试容器的完整测试均为 `83 passed`，候选镜像已完成隔离构建与真实 HTTP/HTML 管理流程验收。生产镜像按精简设计只安装运行依赖，不内置 `pytest`；一次性测试容器另行提供开发测试依赖。由于生产镜像显式设置 `CACHE_DIR=/app/data/cache/webdav`，运行测试时必须对 pytest 进程使用 `env -u CACHE_DIR`，使配置测试能够验证“未显式配置缓存目录时，缓存目录随临时 `DATA_DIR` 派生”的行为；这不会改变正式容器的生产配置。本轮未执行浏览器视觉验收。
+
+V2.2.1 Docker Registry/Config 摘要仍须待正式发布并从 Registry 回读后补录。
 
 当前 V2 实施与验证记录见 [REPORT.md](REPORT.md)。

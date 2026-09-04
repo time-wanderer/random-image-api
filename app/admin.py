@@ -39,6 +39,7 @@ from app.catalog import classify_orientation
 _FORMAT_EXTENSIONS = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
 _CONTENT_TYPES = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}
 _SLUG_PART = re.compile(r"[^a-z0-9]+")
+_UNTAGGED_FILTER = "__untagged__"
 
 
 @dataclass(slots=True)
@@ -713,8 +714,11 @@ def create_admin_router(settings: Any) -> APIRouter:
         filters = {"source": source, "per_page": per_page, "orientation": orientation, "cached": cached, "enabled": enabled, "tag": tag, "storage": storage, "q": q, "sort": sort, "direction": direction}
         with db.get_conn(settings.database_path) as conn:
             all_tags = conn.execute("SELECT id,slug,display_name,enabled FROM tags ORDER BY slug").fetchall()
-            if tag and conn.execute("SELECT 1 FROM tags WHERE slug=? COLLATE NOCASE", (tag,)).fetchone() is None:
-                tag = ""; filters["tag"] = ""
+            selected_tag = None
+            if tag and tag != _UNTAGGED_FILTER:
+                selected_tag = conn.execute(
+                    "SELECT slug,display_name FROM tags WHERE slug=? COLLATE NOCASE", (tag,)
+                ).fetchone()
             clauses: list[str] = []
             args: list[object] = []
             if source == "webdav":
@@ -722,7 +726,9 @@ def create_admin_router(settings: Any) -> APIRouter:
                 if orientation in {"desktop", "mobile", "square"}: clauses.append("o.orientation=?"); args.append(orientation)
                 if enabled: clauses.append("o.enabled=?"); args.append(int(enabled))
                 if cached: clauses.append("c.href IS NOT NULL" if cached == "1" else "c.href IS NULL")
-                if tag: clauses.append("EXISTS(SELECT 1 FROM webdav_object_tags x JOIN tags t ON t.id=x.tag_id WHERE x.href=o.href AND t.slug=? COLLATE NOCASE)"); args.append(tag)
+                if tag == _UNTAGGED_FILTER: clauses.append("NOT EXISTS(SELECT 1 FROM webdav_object_tags x WHERE x.href=o.href)")
+                elif selected_tag is not None: clauses.append("EXISTS(SELECT 1 FROM webdav_object_tags x JOIN tags t ON t.id=x.tag_id WHERE x.href=o.href AND t.slug=? COLLATE NOCASE)"); args.append(tag)
+                elif tag: clauses.append("0=1")
                 if q: clauses.append("o.href LIKE ? ESCAPE '\\'"); args.append(_like_pattern(q))
                 where = " WHERE " + " AND ".join(clauses)
                 total = int(conn.execute("SELECT COUNT(*) FROM webdav_objects o LEFT JOIN webdav_cache c ON c.href=o.href" + where, args).fetchone()[0])
@@ -743,7 +749,9 @@ def create_admin_router(settings: Any) -> APIRouter:
                 clauses.append("i.source='local'")
                 if orientation: clauses.append("i.orientation=?"); args.append(orientation)
                 if enabled: clauses.append("i.enabled=?"); args.append(int(enabled))
-                if tag: clauses.append("EXISTS(SELECT 1 FROM image_tags x JOIN tags t ON t.id=x.tag_id WHERE x.image_id=i.id AND t.slug=? COLLATE NOCASE)"); args.append(tag)
+                if tag == _UNTAGGED_FILTER: clauses.append("NOT EXISTS(SELECT 1 FROM image_tags x WHERE x.image_id=i.id)")
+                elif selected_tag is not None: clauses.append("EXISTS(SELECT 1 FROM image_tags x JOIN tags t ON t.id=x.tag_id WHERE x.image_id=i.id AND t.slug=? COLLATE NOCASE)"); args.append(tag)
+                elif tag: clauses.append("0=1")
                 if storage == "root": clauses.append("instr(i.rel_path,'/')=0")
                 elif storage: clauses.append("i.rel_path LIKE ? ESCAPE '\\'"); args.append(storage + "/%")
                 if q: clauses.append("i.rel_path LIKE ? ESCAPE '\\'"); args.append(_like_pattern(q))
@@ -767,8 +775,9 @@ def create_admin_router(settings: Any) -> APIRouter:
                 heading="本地图片"; listing="".join(cards)
         def opts(values: list[tuple[str,str]], current: str) -> str:
             return '<option value="">全部</option>'+''.join(f'<option value="{_escape(v)}"{" selected" if v==current else ""}>{_escape(label)}</option>' for v,label in values)
-        tag_opts='<option value="">全部标签</option>'+''.join(f'<option value="{_escape(x["slug"])}"{" selected" if x["slug"]==tag else ""}>{_escape(x["slug"])}</option>' for x in all_tags)
-        controls=(f'<section class="panel toolbar"><div><p class="eyebrow">图片库</p><h3>筛选工具栏</h3><span class="help-text">先用快速筛选缩小范围，再展开高级筛选。</span></div><a class="clear-filter" href="{_escape(admin_path)}/images?source={_escape(source)}">清除筛选</a></section><section class="panel"><div class="filter-group"><h3>快速筛选</h3><form class="filters" method="get"><label>数据来源<select name="source">{opts([("local","本地图片"),("webdav","WebDAV 图片")],source)}</select></label><label>真实方向<select name="orientation">{opts([("desktop","横屏 Desktop"),("mobile","竖屏 Mobile"),("square","方形 Square")],orientation)}</select></label><label>标签<select name="tag">{tag_opts}</select></label><button>应用快速筛选</button></form></div><details class="filter-group"><summary><h3>高级筛选</h3></summary><form class="filters" method="get"><input type="hidden" name="source" value="{_escape(source)}"><input type="hidden" name="orientation" value="{_escape(orientation)}"><input type="hidden" name="tag" value="{_escape(tag)}"><label>存放目录<select name="storage">{opts([("root","根目录"),("desktop","desktop 目录"),("mobile","mobile 目录"),("square","square 目录")],storage)}</select></label><label>启用状态<select name="enabled">{opts([("1","仅启用"),("0","仅停用")],enabled)}</select></label><label>缓存状态<select name="cached">{opts([("1","已缓存"),("0","未缓存")],cached)}</select></label><label>文件名 / HREF<input name="q" value="{_escape(q)}" placeholder="输入关键词"></label><label>排序字段<select name="sort">{opts([("added_at","添加时间"),("filename","文件名"),("direction","真实方向"),("source","来源")],sort)}</select></label><label>排序方向<select name="direction">{opts([("asc","升序"),("desc","降序")],direction)}</select></label><label>每页数量<select name="per_page">{opts([("12","12 条"),("20","20 条"),("40","40 条"),("80","80 条")],str(per_page))}</select></label><button class="secondary">应用高级筛选</button></form></details></section>')
+        tag_opts=(f'<option value="">全部标签</option><option value="{_UNTAGGED_FILTER}"{" selected" if tag == _UNTAGGED_FILTER else ""}>无标签</option>'
+                  + ''.join(f'<option value="{_escape(x["slug"])}"{" selected" if x["slug"]==tag else ""}>{_escape(x["slug"])}</option>' for x in all_tags))
+        controls=(f'<section class="panel toolbar"><div><p class="eyebrow">图片库</p><h3>筛选工具栏</h3><span class="help-text">先用快速筛选缩小范围，再展开高级筛选。</span></div><a class="clear-filter" href="{_escape(admin_path)}/images?source={_escape(source)}" title="保留当前数据来源并清除其他筛选">清除筛选</a></section><section class="panel"><div class="filter-group"><h3>快速筛选</h3><form class="filters" method="get"><label>数据来源<select name="source">{opts([("local","本地图片"),("webdav","WebDAV 图片")],source)}</select></label><label>真实方向<select name="orientation">{opts([("desktop","横屏 Desktop"),("mobile","竖屏 Mobile"),("square","方形 Square")],orientation)}</select></label><label>标签<span class="label-note">“无标签”表示没有任何标签关系</span><select name="tag" aria-describedby="tag-filter-help">{tag_opts}</select></label><button>应用快速筛选</button><span id="tag-filter-help" class="help-text">全部标签不会限制结果；无标签与用户创建标签互斥。</span></form></div><details class="filter-group"><summary><h3>高级筛选</h3></summary><form class="filters" method="get"><input type="hidden" name="source" value="{_escape(source)}"><input type="hidden" name="orientation" value="{_escape(orientation)}"><input type="hidden" name="tag" value="{_escape(tag)}"><label>存放目录<select name="storage">{opts([("root","根目录"),("desktop","desktop 目录"),("mobile","mobile 目录"),("square","square 目录")],storage)}</select></label><label>启用状态<select name="enabled">{opts([("1","仅启用"),("0","仅停用")],enabled)}</select></label><label>缓存状态<select name="cached">{opts([("1","已缓存"),("0","未缓存")],cached)}</select></label><label>文件名 / HREF<input name="q" value="{_escape(q)}" placeholder="输入关键词"></label><label>排序字段<select name="sort">{opts([("added_at","添加时间"),("filename","文件名"),("direction","真实方向"),("source","来源")],sort)}</select></label><label>排序方向<select name="direction">{opts([("asc","升序"),("desc","降序")],direction)}</select></label><label>每页数量<select name="per_page">{opts([("12","12 条"),("20","20 条"),("40","40 条"),("80","80 条")],str(per_page))}</select></label><button class="secondary">应用高级筛选</button></form></details></section>')
 
         pager=[]
         if page>1: pager.append(f'<a rel="prev" href="{admin_path}/images?{_escape(urlencode({**filters,"page":page-1}))}">上一页</a>')
@@ -777,9 +786,13 @@ def create_admin_router(settings: Any) -> APIRouter:
         if source=="local":
             candidates=''.join(f'<option value="{int(x["id"])}">{_escape(x["display_name"])} — {_escape(x["slug"])}</option>' for x in all_tags if x["enabled"])
             batch=f'<form class="panel form-grid floating-toolbar" id="batch-tags" data-batch-toolbar="1" method="post" action="{admin_path}/images/tags"><p class="muted">批量标签：先勾选图片，再选择标签和操作。<span id="batch-count">请选择图片</span> <button type="button" class="secondary" data-batch-select="all">全选</button> <button type="button" class="secondary" data-batch-select="none">取消全选</button></p>{hidden(session.csrf)}<label>批量标签<select name="tag_id" required><option value="">选择标签</option>{candidates}</select></label><label>操作<select name="action"><option value="add">添加标签</option><option value="remove">移除标签</option></select></label><button type="submit">应用到选中图片</button></form>'
-        result = f'<section class="result-toolbar"><div><p class="eyebrow">图片库</p><h2>{_escape(heading)}</h2><p class="muted">真实方向来自图片内容；存放目录只是文件所在的归档目录。</p><p class="muted">操作按状态、标签、归档分组；危险操作会要求确认。删除本地原图前会提示：确定删除本地原图？此操作不可撤销。</p></div><strong>筛选结果：{int(total)} 张</strong></section>'
+        tag_summary = "无标签" if tag == _UNTAGGED_FILTER else (str(selected_tag["display_name"]) if selected_tag is not None else "全部标签")
+        result = f'<section class="result-toolbar"><div><p class="eyebrow">图片库</p><h2>{_escape(heading)}</h2><p class="muted">当前条件：标签：{_escape(tag_summary)}</p><p class="muted">真实方向来自图片内容；存放目录只是文件所在的归档目录。</p><p class="muted">操作按状态、标签、归档分组；危险操作会要求确认。删除本地原图前会提示：确定删除本地原图？此操作不可撤销。</p></div><strong>筛选结果：{int(total)} 张</strong></section>'
         if not listing:
-            listing = '<section class="panel empty-state"><div class="empty-icon" aria-hidden="true">▧</div><h3>没有匹配的图片</h3><p class="muted">调整筛选条件，或先从总览上传图片。</p></section>'
+            if tag == _UNTAGGED_FILTER:
+                listing = f'<section class="panel empty-state"><div class="empty-icon" aria-hidden="true">▧</div><h3>当前筛选条件下没有无标签图片</h3><p class="muted">可调整其他筛选条件，或上传尚未添加标签的图片。</p><div class="actions"><a class="button secondary" href="{_escape(admin_path)}#upload">前往上传</a><a class="button secondary" href="{_escape(admin_path)}/tags">管理标签</a></div></section>'
+            else:
+                listing = f'<section class="panel empty-state"><div class="empty-icon" aria-hidden="true">▧</div><h3>没有匹配的图片</h3><p class="muted">调整筛选条件，或先从总览上传图片。</p><a class="button secondary" href="{_escape(admin_path)}#upload">前往上传</a></section>'
         layers='<section id="image-lightbox" class="lightbox" role="dialog" aria-modal="true" aria-label="大图预览" hidden><button type="button" class="dialog-close" data-close-layer="image-lightbox" aria-label="关闭大图">关闭</button><img alt="大图预览"></section><section id="image-detail-drawer" class="drawer" role="dialog" aria-modal="true" aria-label="图片详情" hidden><aside class="drawer-panel"><button type="button" class="dialog-close" data-close-layer="image-detail-drawer" aria-label="关闭详情">关闭</button><div class="drawer-content"></div></aside></section>'
         return _page("图片库",f'{controls}{result}<section class="grid">{listing}</section>{batch}<nav class="pager">{" ".join(pager)}</nav>{layers}',session.csrf,page_nav("images", session.csrf))
 

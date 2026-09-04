@@ -692,3 +692,99 @@ def test_admin_ux_information_architecture_and_responsive_contract(admin_env) ->
         assert "if(e.target.matches('[data-batch-image]'))refreshBatchSelection()" in images
         assert "document.querySelectorAll('[data-batch-image]').forEach(function(x){x.checked=checked;});refreshBatchSelection();" in images
         assert "if(bar)bar.hidden=!count" in images
+
+
+def test_untagged_filter_local_webdav_combinations_injection_and_pagination(admin_env) -> None:
+    settings, app = admin_env
+    with new_client(app) as client:
+        login(client)
+        now = db.utc_now()
+        with db.get_conn(settings.database_path) as conn:
+            tag_id = db.ensure_tag(conn, "topic", "主题")
+            disabled_id = db.ensure_tag(conn, "disabled-topic", "停用主题")
+            conn.execute("UPDATE tags SET enabled=0 WHERE id=?", (disabled_id,))
+            local_rows = (
+                ("desktop/untagged-a.png", "desktop", 1),
+                ("desktop/untagged-b.png", "desktop", 1),
+                ("desktop/tagged.png", "desktop", 1),
+                ("desktop/disabled-tagged.png", "desktop", 1),
+                ("mobile/untagged-mobile.png", "mobile", 1),
+                ("desktop/untagged-off.png", "desktop", 0),
+            )
+            for index, (rel_path, orientation, enabled) in enumerate(local_rows, 1):
+                conn.execute(
+                    "INSERT INTO images(rel_path,width,height,orientation,format,content_type,file_size,mtime_ns,updated_at,enabled,source) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (rel_path, 30, 10, orientation, "PNG", "image/png", 10, index, now, enabled, "local"),
+                )
+            ids = {row["rel_path"]: int(row["id"]) for row in conn.execute("SELECT id,rel_path FROM images")}
+            conn.execute("INSERT INTO image_tags(image_id,tag_id,created_at) VALUES(?,?,?)", (ids["desktop/tagged.png"], tag_id, now))
+            conn.execute("INSERT INTO image_tags(image_id,tag_id,created_at) VALUES(?,?,?)", (ids["desktop/disabled-tagged.png"], disabled_id, now))
+
+            webdav_rows = (
+                ("/remote/untagged-a.png", "desktop", 1),
+                ("/remote/untagged-b.png", "desktop", 1),
+                ("/remote/tagged.png", "desktop", 1),
+                ("/remote/untagged-mobile.png", "mobile", 1),
+                ("/remote/untagged-off.png", "desktop", 0),
+            )
+            for href, orientation, enabled in webdav_rows:
+                conn.execute(
+                    "INSERT INTO webdav_objects(href,orientation,updated_at,enabled) VALUES(?,?,?,?)",
+                    (href, orientation, now, enabled),
+                )
+            conn.execute("INSERT INTO webdav_object_tags(href,tag_id,origin,created_at) VALUES(?,?,?,?)", ("/remote/tagged.png", tag_id, "admin", now))
+            conn.execute(
+                "INSERT INTO webdav_cache(href,cache_name,orientation,width,height,content_type,file_size,fetched_at,accessed_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                ("/remote/untagged-a.png", "untagged-a.png", "desktop", 30, 10, "image/png", 10, 1, 1),
+            )
+
+        local = client.get(
+            f"{ADMIN}/images",
+            params={"source": "local", "tag": "__untagged__", "orientation": "desktop", "storage": "desktop", "enabled": "1", "q": "untagged", "sort": "filename", "direction": "asc", "per_page": 1},
+        )
+        assert local.status_code == 200
+        assert '<option value="__untagged__" selected>无标签</option>' in local.text
+        assert "当前条件：标签：无标签" in local.text
+        assert "desktop/untagged-a.png" in local.text and "desktop/tagged.png" not in local.text
+        assert "disabled-tagged.png" not in local.text
+        assert "下一页" in local.text and "tag=__untagged__" in local.text
+        assert all(piece in local.text for piece in ("orientation=desktop", "storage=desktop", "enabled=1", "q=untagged", "sort=filename", "direction=asc"))
+
+        second = client.get(
+            f"{ADMIN}/images",
+            params={"source": "local", "tag": "__untagged__", "orientation": "desktop", "storage": "desktop", "enabled": "1", "q": "untagged", "sort": "filename", "direction": "asc", "per_page": 1, "page": 2},
+        )
+        assert '<option value="__untagged__" selected>无标签</option>' in second.text
+        assert "上一页" in second.text and "tag=__untagged__" in second.text
+
+        remote = client.get(
+            f"{ADMIN}/images",
+            params={"source": "webdav", "tag": "__untagged__", "orientation": "desktop", "enabled": "1", "cached": "1", "q": "untagged-a", "sort": "filename", "direction": "asc"},
+        )
+        assert remote.status_code == 200
+        assert "/remote/untagged-a.png" in remote.text
+        assert "/remote/untagged-b.png" not in remote.text and "/remote/tagged.png" not in remote.text
+        assert "当前条件：标签：无标签" in remote.text
+
+        injection = client.get(f"{ADMIN}/images", params={"source": "local", "tag": "' OR 1=1--"})
+        assert injection.status_code == 200
+        assert "筛选结果：0 张" in injection.text
+        assert "untagged-a.png" not in injection.text and "tagged.png" not in injection.text
+        with db.get_conn(settings.database_path) as conn:
+            assert int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]) == len(local_rows)
+            assert int(conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0]) == 2
+
+
+def test_untagged_filter_empty_state_and_reserved_value_contract(admin_env) -> None:
+    _settings, app = admin_env
+    with pytest.raises(ValueError):
+        db.validate_slug("__untagged__")
+    with new_client(app) as client:
+        login(client)
+        page = client.get(f"{ADMIN}/images", params={"source": "local", "tag": "__untagged__"})
+        assert page.status_code == 200
+        assert '<option value="">全部标签</option>' in page.text
+        assert '<option value="__untagged__" selected>无标签</option>' in page.text
+        assert "当前筛选条件下没有无标签图片" in page.text
+        assert "前往上传" in page.text and "管理标签" in page.text
+        assert "没有匹配的图片" not in page.text
