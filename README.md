@@ -2,6 +2,8 @@
 
 Random Image API V2 是 V1 的**向后兼容扩展**：保留 V1 的 `GET /random`、`?type=`、本地图库、WebDAV Hybrid、默认 90% 远程优先、缓存、归档 importer、Backup / Restore，并新增主题标签和安全管理 UI。V2.2 在不改变 API 和数据库 schema 的前提下，重点优化管理网页与本地图片整理体验。
 
+> 当前版本：V2.2.1，已正式发布为 `qinlingmonkey/random-image-api:v2`（`linux/amd64`）。独立回读确认 Manifest/Registry 摘要为 `sha256:bd1dc2e6fa5b0882cb9fb3d6bf8816d2f175e7bd05624b3140544d9efefbbda8`，Config 摘要为 `sha256:1088deae369cf6e5a3e370dc4beaf7399b672cb6988ec5686cd9d3b316956633`，共 12 层，Entrypoint 为 `/usr/local/bin/docker-entrypoint.sh`；源码功能提交 `c32b1d1426b70c4b10b7435a8aa7a55d0fd6907b` 已同步 GitHub `main`。V2.2.0 摘要仅作为历史记录；`v1` 继续保留用于旧部署与回滚。Docker Hub 线上 Overview 尚待本轮工具同步，本文不声称其已同步。
+
 V1 快照见 [docs/V1.md](docs/V1.md)，V1 原地升级和 VPS 迁移见 [MIGRATION.md](MIGRATION.md)。
 
 ## 1. V2 与 V2.2 能力
@@ -344,8 +346,8 @@ python -m compileall -q app tests
 bash -n scripts/*.sh docker-entrypoint.sh
 ```
 
-V2.2.1 本地及远程一次性测试容器的完整测试均为 `83 passed`，候选镜像已完成隔离构建与真实 HTTP/HTML 管理流程验收。生产镜像按精简设计只安装运行依赖，不内置 `pytest`；一次性测试容器另行提供开发测试依赖。由于生产镜像显式设置 `CACHE_DIR=/app/data/cache/webdav`，运行测试时必须对 pytest 进程使用 `env -u CACHE_DIR`，使配置测试能够验证“未显式配置缓存目录时，缓存目录随临时 `DATA_DIR` 派生”的行为；这不会改变正式容器的生产配置。本轮未执行浏览器视觉验收。
+V2.2.1 本地及远程一次性测试容器的完整测试均为 `83 passed`，正式发布镜像在发布前已完成隔离构建与真实 HTTP/HTML 管理流程验收。生产镜像按精简设计只安装运行依赖，不内置 `pytest`；一次性测试容器另行提供开发测试依赖。由于生产镜像显式设置 `CACHE_DIR=/app/data/cache/webdav`，运行测试时必须对 pytest 进程使用 `env -u CACHE_DIR`，使配置测试能够验证“未显式配置缓存目录时，缓存目录随临时 `DATA_DIR` 派生”的行为；这不会改变正式容器的生产配置。本轮未执行浏览器视觉验收。
 
-V2.2.1 Docker Registry/Config 摘要仍须待正式发布并从 Registry 回读后补录。
+V2.2.1 Docker Registry/Config 摘要已在正式发布后独立回读确认；Docker Hub 线上 Overview 尚待本轮工具同步。
 
 当前 V2 实施与验证记录见 [REPORT.md](REPORT.md)。

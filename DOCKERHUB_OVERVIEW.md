@@ -4,18 +4,22 @@ Random Image API V2 是 V1 的向后兼容扩展，增加 tags、多对多主题
 
 ## 发布状态（请先阅读）
 
-- **当前版本**：V2.2.1（本地发布候选，尚未提交或发布）
-- **目标镜像**：`qinlingmonkey/random-image-api:v2`
-- **验收状态**：V2.2.1 本地与远程一次性测试容器完整测试均为 `83 passed`；候选镜像隔离构建、运行及真实 HTTP/HTML 管理流程验收通过
+- **当前版本**：V2.2.1（已正式发布）
+- **发布镜像**：`qinlingmonkey/random-image-api:v2`
+- **验收状态**：V2.2.1 本地与远程一次性测试容器完整测试均为 `83 passed`；正式发布镜像在发布前已通过隔离构建、运行及真实 HTTP/HTML 管理流程验收
 - **平台**：`linux/amd64`
-- **V2.2.1 Registry / Config 摘要**：待正式发布并从 Registry 回读后补录
+- **V2.2.1 Manifest / Registry 摘要**：`sha256:bd1dc2e6fa5b0882cb9fb3d6bf8816d2f175e7bd05624b3140544d9efefbbda8`
+- **V2.2.1 Config 摘要**：`sha256:1088deae369cf6e5a3e370dc4beaf7399b672cb6988ec5686cd9d3b316956633`
+- **镜像结构**：12 层；Entrypoint `/usr/local/bin/docker-entrypoint.sh`
+- **V2.2.1 源码功能提交**：`c32b1d1426b70c4b10b7435a8aa7a55d0fd6907b`（已同步 GitHub `main`）
 - **V2.2.0 历史摘要**：Registry `sha256:268860bd1cb046f9a7f9f34dfc6ec6396e5748993f67d91cd202032f2189e490`；Config `sha256:faa555405f7b82bd824ee741791fbd8adfa3823b47b5289bddc825483e2cdd32`
 - **V2.2.0 历史 GitHub 提交**：`384a155290c69dbd65dda08d2d374dccc2f2a7e7`
 - **兼容回滚版本**：`qinlingmonkey/random-image-api:v1`，继续保留且不会被 V2 覆盖
+- **Docker Hub 线上 Overview**：尚待本轮工具同步；本文不声称线上文案已更新
 
 V2 是 V1 的扩展：旧的 `/random`、`?type=`、本地图库和 WebDAV Hybrid 部署可以继续使用；升级前仍应先备份 SQLite 与永久图片。
 
-远程候选验收使用一次性测试容器另行提供开发测试依赖；生产镜像按精简设计只安装运行依赖，不内置 `pytest`。生产镜像显式设置 `CACHE_DIR=/app/data/cache/webdav`，因此测试进程必须使用 `env -u CACHE_DIR`，以验证未显式配置缓存目录时会随临时 `DATA_DIR` 派生缓存路径；该操作仅隔离测试环境变量，不改变正式容器配置。本轮验证了版本 `2.2.1`、健康状态、UID `1000`、未登录 `401`、登录/CSRF、真实 PNG 上传、无标签筛选与标签关系变化、SQLite 关系、正式数据布局下的备份内容与脱敏。验收仅使用真实 HTTP/HTML 管理流程，未执行浏览器视觉验收；隔离容器、候选镜像和临时目录已清理，原有容器快照前后一致。
+正式发布镜像的发布前验收使用一次性测试容器另行提供开发测试依赖；生产镜像按精简设计只安装运行依赖，不内置 `pytest`。生产镜像显式设置 `CACHE_DIR=/app/data/cache/webdav`，因此测试进程必须使用 `env -u CACHE_DIR`，以验证未显式配置缓存目录时会随临时 `DATA_DIR` 派生缓存路径；该操作仅隔离测试环境变量，不改变正式容器配置。本轮验证了版本 `2.2.1`、健康状态、UID `1000`、未登录 `401`、登录/CSRF、真实 PNG 上传、无标签筛选与标签关系变化、SQLite 关系、正式数据布局下的备份内容与脱敏。验收仅使用真实 HTTP/HTML 管理流程，未执行浏览器视觉验收；隔离容器、候选镜像和临时目录已清理，原有容器快照前后一致。正式发布后已独立回读并确认上述镜像元数据。
 
 ## 1. 使用 V2 镜像快速部署
 

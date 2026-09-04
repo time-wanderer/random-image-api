@@ -2,9 +2,9 @@
 
 ## 1. 报告范围
 
-本报告记录 Random Image API V2.2 文档与当前本地实现的状态。当前本地发布候选版本为 V2.2.1；V2.2 保留 V1/V2 API、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、tags 和主题接口，重点优化管理 UI、图片预览、物理目录整理与标签编辑。
+本报告记录 Random Image API V2.2 文档、当前本地实现与正式发布状态。当前正式版本为 V2.2.1；V2.2 保留 V1/V2 API、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、tags 和主题接口，重点优化管理 UI、图片预览、物理目录整理与标签编辑。
 
-V2.2.1 本地与远程一次性测试容器的完整测试均为 `83 passed`，候选镜像隔离构建、运行及真实 HTTP/HTML 管理流程验收通过。本次文档收尾未提交、推送、远程连接或发布；V2.2.1 的 Registry/Config 摘要必须在正式发布并回读 Registry 后补录。V2.2.0 已发布镜像的历史 Registry 摘要为 `sha256:268860bd1cb046f9a7f9f34dfc6ec6396e5748993f67d91cd202032f2189e490`，不得作为 V2.2.1 摘要；`v1` 继续保留用于旧部署与回滚。
+V2.2.1 本地与远程一次性测试容器的完整测试均为 `83 passed`，正式发布镜像在发布前已通过隔离构建、运行及真实 HTTP/HTML 管理流程验收。`qinlingmonkey/random-image-api:v2` 已正式发布为版本 `2.2.1`、平台 `linux/amd64`；发布后独立回读确认 Manifest/Registry 摘要为 `sha256:bd1dc2e6fa5b0882cb9fb3d6bf8816d2f175e7bd05624b3140544d9efefbbda8`，Config 摘要为 `sha256:1088deae369cf6e5a3e370dc4beaf7399b672cb6988ec5686cd9d3b316956633`，共 12 层，Entrypoint 为 `/usr/local/bin/docker-entrypoint.sh`。源码功能提交 `c32b1d1426b70c4b10b7435a8aa7a55d0fd6907b` 已同步 GitHub `main`。V2.2.0 的摘要只作为历史记录；`v1` 继续保留用于旧部署与回滚。本次文档收尾未提交、推送或远程连接；Docker Hub 线上 Overview 尚待本轮工具同步，本文不声称其已同步。
 
 ## 2. 信息来源与调研说明
 
@@ -155,13 +155,14 @@ V2.2 新增或完善：
 - 关联停用标签的图片不算无标签；无标签可与来源、方向、存放目录、启用/缓存状态、文件名/HREF 搜索、排序和分页组合；
 - 筛选项、刷新/分页选中状态、当前条件摘要、专属空状态及 SQL 注入式输入均有回归测试；
 - 本地与远程一次性测试容器完整 `pytest -q` 均为 `83 passed`。生产镜像按精简设计只安装 `requirements.txt` 中的运行依赖，不内置 `pytest`；远程测试由一次性测试容器另行提供 `requirements-dev.txt` 中的开发测试依赖；
-- 生产镜像显式设置 `CACHE_DIR=/app/data/cache/webdav`。运行完整测试时对 pytest 进程使用 `env -u CACHE_DIR`，是为了避免生产默认值覆盖配置测试的未配置场景，使其能够验证缓存目录随临时 `DATA_DIR` 派生；该操作只隔离测试进程环境，不改变候选镜像的正式运行配置；
-- 候选镜像构建成功，应用版本为 `2.2.1`；隔离运行中 `/health` 正常，主进程 UID 为 `1000`，未登录访问返回 `401`，登录和 CSRF 流程通过；
+- 生产镜像显式设置 `CACHE_DIR=/app/data/cache/webdav`。运行完整测试时对 pytest 进程使用 `env -u CACHE_DIR`，是为了避免生产默认值覆盖配置测试的未配置场景，使其能够验证缓存目录随临时 `DATA_DIR` 派生；该操作只隔离测试进程环境，不改变正式发布镜像的运行配置；
+- 正式发布镜像在发布前构建成功，应用版本为 `2.2.1`；隔离运行中 `/health` 正常，主进程 UID 为 `1000`，未登录访问返回 `401`，登录和 CSRF 流程通过；
 - 真实 PNG 上传后可由“无标签”筛选命中；创建并关联标签后，该图片从无标签结果移除，SQLite 标签关系与页面结果一致；
 - 按正式 `data` 布局执行的 Backup 内容检查与配置脱敏通过；原有容器快照前后一致，隔离容器、候选镜像和临时目录均已清理；
 - 本轮仅执行真实 HTTP/HTML 管理流程验收，未执行浏览器视觉验收，不据此声称视觉验收通过；
 - 远程测试复用既有长期 SSH 密钥并按约定保留，未因本轮清理撤销或删除；
-- 当前 Python `compileall`、tracked Shell 语法、`git diff --check`、Markdown 围栏与 Secret 扫描均通过；本次文档收尾未提交、推送、远程连接或发布，V2.2.1 镜像摘要仍待正式发布并回读 Registry 后补录。
+- 发布后通过独立回读确认 `qinlingmonkey/random-image-api:v2` 为版本 `2.2.1`、平台 `linux/amd64`，Manifest/Registry 摘要为 `sha256:bd1dc2e6fa5b0882cb9fb3d6bf8816d2f175e7bd05624b3140544d9efefbbda8`，Config 摘要为 `sha256:1088deae369cf6e5a3e370dc4beaf7399b672cb6988ec5686cd9d3b316956633`，共 12 层，Entrypoint 为 `/usr/local/bin/docker-entrypoint.sh`；源码功能提交 `c32b1d1426b70c4b10b7435a8aa7a55d0fd6907b` 已同步 GitHub `main`；
+- 本次文档收尾不修改代码或测试，未提交、推送或远程连接；Docker Hub 线上 Overview 尚待本轮工具同步，不声称线上文案已经更新。
 
 ### 6.5 V2.2 远程隔离 Docker 验收
 
