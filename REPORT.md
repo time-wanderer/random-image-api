@@ -4,7 +4,7 @@
 
 本报告记录 Random Image API V2.2 文档、当前实现与发布状态。当前源码版本为 V2.2.2；V2.2 保留 V1/V2 API、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、tags 和主题接口，重点优化管理 UI、图片预览、物理目录整理与标签编辑。
 
-V2.2.2 修复命令行归档导入无法打标签、网页压缩包上传内存与临时文件生命周期、多标签归档关联，以及管理会话失效后 HTML 页面不返回登录页的问题。最终候选镜像完整测试为 `88 passed`，远程健康检查、未登录 HTML `GET` 的 `303` 登录回退和 Uvicorn PID 1 UID `1000` 均通过；测试后原有 10 个容器快照一致，隔离容器、镜像和目录已清理。Docker Hub `qinlingmonkey/random-image-api:v2` 当前仍为已发布的 V2.2.1、平台 `linux/amd64`，其 Manifest/Registry 摘要为 `sha256:bd1dc2e6fa5b0882cb9fb3d6bf8816d2f175e7bd05624b3140544d9efefbbda8`，Config 摘要为 `sha256:1088deae369cf6e5a3e370dc4beaf7399b672cb6988ec5686cd9d3b316956633`。本轮先同步 V2.2.2 源码，不把尚未发布的镜像描述为 V2.2.2；长期复用 SSH 密钥按约定保留。
+V2.2.2 修复命令行归档导入无法打标签、网页压缩包上传内存与临时文件生命周期、多标签归档关联，以及管理会话失效后 HTML 页面不返回登录页的问题。最终候选镜像完整测试为 `88 passed`，远程健康检查、未登录 HTML `GET` 的 `303` 登录回退和 Uvicorn PID 1 UID `1000` 均通过；发布前后原有 10 个容器快照一致，隔离容器、候选镜像、临时认证和目录均已清理。Docker Hub `qinlingmonkey/random-image-api:v2` 已发布为 V2.2.2、平台 `linux/amd64`；独立回读确认 Manifest/Registry 摘要为 `sha256:7ca9a5958242417a0b1f9b5b5609a437f8158db55ab5323e989adcd098d0ae2f`，Config 摘要为 `sha256:0c1a92c610d5af76bb115f8ceab8d4b70f10be778ee5cef6b0843b7b83267ef3`，共 12 层，Entrypoint 为 `/usr/local/bin/docker-entrypoint.sh`。源码功能提交 `d8752a0321404d8ad7ec2cfa3e2c8d06bf9bbd2b` 已同步 GitHub `main`；长期复用 SSH 密钥按约定保留。
 
 ## 2. 信息来源与调研说明
 
@@ -175,7 +175,7 @@ V2.2 新增或完善：
 - 独立审查发现并修复两项高优先级异常路径：multipart 临时文件未确定性关闭，以及归档在第二个 `os.replace()` 失败时可能留下第一个已提交文件。新增故障注入测试确认只撤销本次新建文件；
 - 最终 V2.2.2 工作树重新构建后，远程候选镜像完整测试为 `88 passed`；`/health` 返回版本 `2.2.2`，管理登录回退和 PID 1 UID `1000` 通过；原有 10 个容器前后快照一致，隔离容器、镜像和目录已清理；
 - 本轮没有执行浏览器视觉验收，不据 HTTP/HTML 合同检查声称视觉验收通过；
-- 当前 Docker Hub `v2` 仍是 V2.2.1。本轮用户要求范围为远程测试和源码推送，尚未执行 V2.2.2 镜像发布或线上 Overview 同步。
+- Docker Hub `v2` 已发布为 V2.2.2；独立回读确认 Manifest/Registry 摘要为 `sha256:7ca9a5958242417a0b1f9b5b5609a437f8158db55ab5323e989adcd098d0ae2f`，Config 摘要为 `sha256:0c1a92c610d5af76bb115f8ceab8d4b70f10be778ee5cef6b0843b7b83267ef3`，平台为 `linux/amd64`，共 12 层，Entrypoint 为 `/usr/local/bin/docker-entrypoint.sh`；镜像内版本核验为 `2.2.2`，发布前后原有 10 个容器快照一致。Docker Hub 线上 Overview 将在本轮文档提交后同步并单独校验。
 
 本轮创建或修改的文件包括 `app/__init__.py`、`app/admin.py`、`app/importer.py`、`requirements.txt`、`tests/test_api.py`、`tests/test_admin.py`、`tests/test_importer.py`、`README.md`、`MIGRATION.md`、`REPORT.md` 和 `DOCKERHUB_OVERVIEW.md`。未修改 `.env`、业务图片、数据库、日志、缓存、备份包或现有远程服务。
 

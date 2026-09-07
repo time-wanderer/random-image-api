@@ -2,7 +2,7 @@
 
 本文覆盖三类迁移：V1→V2 原地升级、V2.0→V2.2 兼容升级，以及把 V2 连同永久数据迁移到新 VPS。V2.2 不改变 API 和 SQLite schema，重点增加响应式图片管理、独立 `square/` 目录、图片移动归档和更完整的标签编辑。
 
-> 当前源码版本为 V2.2.2，继续兼容 V2.2.1 的 API、SQLite schema 和数据目录。升级会重启进程内管理会话，管理员需要重新登录；尚未确认的归档 preview 需要重新上传并预览。Docker Hub `v2` 当前仍为 V2.2.1，使用源码构建前应核对 GitHub `main` 的版本。
+> 当前源码与 Docker Hub `qinlingmonkey/random-image-api:v2` 均为 V2.2.2，继续兼容 V2.2.1 的 API、SQLite schema 和数据目录。升级会重启进程内管理会话，管理员需要重新登录；尚未确认的归档 preview 需要重新上传并预览。发布镜像平台为 `linux/amd64`，Manifest/Registry 摘要为 `sha256:7ca9a5958242417a0b1f9b5b5609a437f8158db55ab5323e989adcd098d0ae2f`。
 
 ## 1. 数据边界
 

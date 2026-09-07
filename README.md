@@ -2,7 +2,7 @@
 
 Random Image API V2 是 V1 的**向后兼容扩展**：保留 V1 的 `GET /random`、`?type=`、本地图库、WebDAV Hybrid、默认 90% 远程优先、缓存、归档 importer、Backup / Restore，并新增主题标签和安全管理 UI。V2.2 在不改变 API 和数据库 schema 的前提下，重点优化管理网页与本地图片整理体验。
 
-> 当前源码版本：V2.2.2。本次补丁增加命令行归档导入多标签、网页归档多标签、multipart 流式磁盘 spool 与确定性资源清理，以及管理会话失效后的登录页回退；远程隔离候选镜像完整测试为 `88 passed`，健康检查、PID 1 UID `1000` 和未登录页面 `303` 回退均通过。Docker Hub `qinlingmonkey/random-image-api:v2` 当前仍为已发布的 V2.2.1（`linux/amd64`），其 Manifest/Registry 摘要为 `sha256:bd1dc2e6fa5b0882cb9fb3d6bf8816d2f175e7bd05624b3140544d9efefbbda8`，Config 摘要为 `sha256:1088deae369cf6e5a3e370dc4beaf7399b672cb6988ec5686cd9d3b316956633`。`v1` 继续保留用于旧部署与回滚。
+> 当前版本：V2.2.2。本次补丁增加命令行归档导入多标签、网页归档多标签、multipart 流式磁盘 spool 与确定性资源清理，以及管理会话失效后的登录页回退；远程隔离候选镜像完整测试为 `88 passed`，健康检查、PID 1 UID `1000` 和未登录页面 `303` 回退均通过。Docker Hub `qinlingmonkey/random-image-api:v2` 已发布为 V2.2.2（`linux/amd64`），独立回读确认 Manifest/Registry 摘要为 `sha256:7ca9a5958242417a0b1f9b5b5609a437f8158db55ab5323e989adcd098d0ae2f`，Config 摘要为 `sha256:0c1a92c610d5af76bb115f8ceab8d4b70f10be778ee5cef6b0843b7b83267ef3`，共 12 层，Entrypoint 为 `/usr/local/bin/docker-entrypoint.sh`；源码功能提交 `d8752a0321404d8ad7ec2cfa3e2c8d06bf9bbd2b` 已同步 GitHub `main`。`v1` 继续保留用于旧部署与回滚。
 
 V1 快照见 [docs/V1.md](docs/V1.md)，V1 原地升级和 VPS 迁移见 [MIGRATION.md](MIGRATION.md)。
 
@@ -357,6 +357,6 @@ bash -n scripts/*.sh docker-entrypoint.sh
 
 V2.2.2 最终候选镜像的完整测试为 `88 passed`。本轮还执行了 Python `compileall`、Shell 语法和 `git diff --check`，并完成远程隔离运行态验收：`/health` 正常，Uvicorn PID 1 的 UID 为 `1000`，未登录访问管理 HTML 页面返回 `303` 并定位到 `/manage-images/login`。原有 10 个容器前后快照一致，测试容器、候选镜像和临时目录均已清理。生产镜像按精简设计只安装运行依赖，不内置 `pytest`；测试进程使用 `env -u CACHE_DIR`，仅用于验证缓存目录的未配置默认行为。本轮未执行浏览器视觉验收。
 
-Docker Hub `v2` 当前仍为已发布的 V2.2.1；其 Registry/Config 摘要已经独立回读确认。V2.2.2 本轮先同步源码，不把尚未发布的 Docker 镜像描述为已发布。
+Docker Hub `v2` 已发布为 V2.2.2；独立回读确认 Manifest/Registry 摘要为 `sha256:7ca9a5958242417a0b1f9b5b5609a437f8158db55ab5323e989adcd098d0ae2f`，Config 摘要为 `sha256:0c1a92c610d5af76bb115f8ceab8d4b70f10be778ee5cef6b0843b7b83267ef3`，平台为 `linux/amd64`，共 12 层。
 
 当前 V2 实施与验证记录见 [REPORT.md](REPORT.md)。

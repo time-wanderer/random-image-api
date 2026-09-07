@@ -4,18 +4,18 @@ Random Image API V2 是 V1 的向后兼容扩展，增加 tags、多对多主题
 
 ## 发布状态（请先阅读）
 
-- **当前源码版本**：V2.2.2（远程隔离候选验收已完成，本轮同步 GitHub `main`）
-- **当前发布镜像**：`qinlingmonkey/random-image-api:v2`，仍为 V2.2.1
-- **V2.2.2 验收状态**：最终候选镜像完整测试为 `88 passed`；健康检查、未登录管理 HTML `GET` 的 `303` 登录回退、PID 1 UID `1000` 和原有容器前后快照均通过
+- **当前源码与发布镜像版本**：V2.2.2
+- **当前发布镜像**：`qinlingmonkey/random-image-api:v2`
+- **V2.2.2 验收状态**：最终候选镜像完整测试为 `88 passed`；健康检查、未登录管理 HTML `GET` 的 `303` 登录回退、PID 1 UID `1000` 和原有 10 个容器前后快照均通过
 - **平台**：`linux/amd64`
-- **V2.2.1 Manifest / Registry 摘要**：`sha256:bd1dc2e6fa5b0882cb9fb3d6bf8816d2f175e7bd05624b3140544d9efefbbda8`
-- **V2.2.1 Config 摘要**：`sha256:1088deae369cf6e5a3e370dc4beaf7399b672cb6988ec5686cd9d3b316956633`
+- **V2.2.2 Manifest / Registry 摘要**：`sha256:7ca9a5958242417a0b1f9b5b5609a437f8158db55ab5323e989adcd098d0ae2f`
+- **V2.2.2 Config 摘要**：`sha256:0c1a92c610d5af76bb115f8ceab8d4b70f10be778ee5cef6b0843b7b83267ef3`
 - **镜像结构**：12 层；Entrypoint `/usr/local/bin/docker-entrypoint.sh`
-- **V2.2.1 源码功能提交**：`c32b1d1426b70c4b10b7435a8aa7a55d0fd6907b`（已同步 GitHub `main`）
+- **V2.2.2 源码功能提交**：`d8752a0321404d8ad7ec2cfa3e2c8d06bf9bbd2b`（已同步 GitHub `main`）
+- **V2.2.1 历史摘要**：Registry `sha256:bd1dc2e6fa5b0882cb9fb3d6bf8816d2f175e7bd05624b3140544d9efefbbda8`；Config `sha256:1088deae369cf6e5a3e370dc4beaf7399b672cb6988ec5686cd9d3b316956633`
 - **V2.2.0 历史摘要**：Registry `sha256:268860bd1cb046f9a7f9f34dfc6ec6396e5748993f67d91cd202032f2189e490`；Config `sha256:faa555405f7b82bd824ee741791fbd8adfa3823b47b5289bddc825483e2cdd32`
-- **V2.2.0 历史 GitHub 提交**：`384a155290c69dbd65dda08d2d374dccc2f2a7e7`
 - **兼容回滚版本**：`qinlingmonkey/random-image-api:v1`，继续保留且不会被 V2 覆盖
-- **Docker Hub 线上 Overview**：尚待本轮工具同步；本文不声称线上文案已更新
+- **Docker Hub 线上 Overview**：本文件为同步来源；发布收尾时通过 API 回读正文并校验一致性
 
 V2 是 V1 的扩展：旧的 `/random`、`?type=`、本地图库和 WebDAV Hybrid 部署可以继续使用；升级前仍应先备份 SQLite 与永久图片。
 
