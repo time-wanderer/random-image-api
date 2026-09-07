@@ -4,9 +4,9 @@ Random Image API V2 是 V1 的向后兼容扩展，增加 tags、多对多主题
 
 ## 发布状态（请先阅读）
 
-- **当前版本**：V2.2.1（已正式发布）
-- **发布镜像**：`qinlingmonkey/random-image-api:v2`
-- **验收状态**：V2.2.1 本地与远程一次性测试容器完整测试均为 `83 passed`；正式发布镜像在发布前已通过隔离构建、运行及真实 HTTP/HTML 管理流程验收
+- **当前源码版本**：V2.2.2（远程隔离候选验收已完成，本轮同步 GitHub `main`）
+- **当前发布镜像**：`qinlingmonkey/random-image-api:v2`，仍为 V2.2.1
+- **V2.2.2 验收状态**：最终候选镜像完整测试为 `88 passed`；健康检查、未登录管理 HTML `GET` 的 `303` 登录回退、PID 1 UID `1000` 和原有容器前后快照均通过
 - **平台**：`linux/amd64`
 - **V2.2.1 Manifest / Registry 摘要**：`sha256:bd1dc2e6fa5b0882cb9fb3d6bf8816d2f175e7bd05624b3140544d9efefbbda8`
 - **V2.2.1 Config 摘要**：`sha256:1088deae369cf6e5a3e370dc4beaf7399b672cb6988ec5686cd9d3b316956633`

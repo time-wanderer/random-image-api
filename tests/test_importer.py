@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from app import db
+from app import importer as importer_module
 from app.importer import (
     ArchiveSecurityError,
     ImportLimits,
@@ -160,3 +162,85 @@ def test_tar_gz_import_and_failure_exit_code(tmp_path: Path, capsys: pytest.Capt
     bad = make_zip(tmp_path / "bad.zip", {"../escape": b"x"})
     assert main([str(bad), "--output-dir", str(tmp_path / "bad-output")]) == 2
     assert "error:" in capsys.readouterr().err
+
+
+def test_import_rolls_back_files_when_commit_fails_midway(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive = make_zip(
+        tmp_path / "two-images.zip",
+        {
+            "wide.png": image_bytes("PNG", (30, 10), "red"),
+            "tall.png": image_bytes("PNG", (10, 30), "blue"),
+        },
+    )
+    output = tmp_path / "images"
+    real_replace = importer_module.os.replace
+    calls = 0
+
+    def failing_replace(source: Path, target: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated commit failure")
+        real_replace(source, target)
+
+    monkeypatch.setattr(importer_module.os, "replace", failing_replace)
+    with pytest.raises(OSError, match="simulated commit failure"):
+        import_archive(archive, output)
+
+    assert calls == 2
+    assert not [path for path in output.rglob("*") if path.is_file()]
+
+
+def test_cli_import_assigns_multiple_tags_in_sqlite(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    archive = make_zip(
+        tmp_path / "tagged.zip",
+        {
+            "wide.png": image_bytes("PNG", (30, 10)),
+            "tall.jpg": image_bytes("JPEG", (10, 30)),
+        },
+    )
+    output = tmp_path / "images"
+    database = tmp_path / "database" / "images.db"
+
+    result = main([
+        str(archive),
+        "--images-dir", str(output),
+        "--database-path", str(database),
+        "--tag", "nature",
+        "--tag", "featured",
+        "--tag", "nature",
+        "--json",
+    ])
+
+    assert result == 0
+    cli_output = capsys.readouterr().out
+    assert '"ok": true' in cli_output
+    assert "tag_targets" not in cli_output
+    assert "created_paths" not in cli_output
+    with db.get_conn(database) as conn:
+        assert int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]) == 2
+        assert {row[0] for row in conn.execute("SELECT slug FROM tags")} == {"nature", "featured"}
+        assert int(conn.execute("SELECT COUNT(*) FROM image_tags").fetchone()[0]) == 4
+
+
+def test_cli_tags_require_database_and_dry_run_writes_nothing(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    archive = make_zip(tmp_path / "dry-tags.zip", {"photo.png": image_bytes("PNG", (20, 10))})
+    output = tmp_path / "images"
+    database = tmp_path / "database" / "images.db"
+
+    assert main([str(archive), "--output-dir", str(output), "--tag", "nature"]) == 2
+    assert "--database-path is required" in capsys.readouterr().err
+    assert not output.exists()
+
+    assert main([
+        str(archive),
+        "--output-dir", str(output),
+        "--database-path", str(database),
+        "--tag", "nature",
+        "--dry-run",
+    ]) == 0
+    assert not output.exists()
+    assert not database.exists()

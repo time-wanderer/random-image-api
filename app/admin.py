@@ -22,16 +22,16 @@ import tarfile
 import time
 import zipfile
 from dataclasses import dataclass
-from email.parser import BytesParser
-from email.policy import default as email_policy
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import parse_qsl, quote, urlencode
+from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.routing import APIRoute
 from PIL import Image, ImageOps, UnidentifiedImageError
-from starlette.datastructures import FormData, UploadFile
+from starlette.datastructures import FormData
+from starlette.formparsers import FormParser, MultiPartException, MultiPartParser
 
 from app import db, importer
 from app.catalog import classify_orientation
@@ -40,6 +40,21 @@ _FORMAT_EXTENSIONS = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
 _CONTENT_TYPES = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}
 _SLUG_PART = re.compile(r"[^a-z0-9]+")
 _UNTAGGED_FILTER = "__untagged__"
+
+
+class _ClosingFormRoute(APIRoute):
+    """Close parsed form uploads after every administration request."""
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def closing_handler(request: Request):
+            try:
+                return await handler(request)
+            finally:
+                await request.close()
+
+        return closing_handler
 
 
 @dataclass(slots=True)
@@ -219,7 +234,7 @@ input[type=checkbox] { width: auto; }
 function closeLayer(layer){if(!layer)return;layer.hidden=true;document.body.style.overflow='';if(layer._opener)layer._opener.focus();}
 document.addEventListener('submit',function(e){var f=e.target;if(!f.matches('form'))return;var sel=f.querySelector('select[name="tag_id"]');if(sel&&sel.required&&!sel.value){e.preventDefault();var h=f.querySelector('.form-error')||document.createElement('p');h.className='alert error form-error';h.setAttribute('role','alert');h.textContent='请先选择一个标签，再提交此操作。';if(!h.parentNode)f.prepend(h);sel.focus();return;}var btn=f.querySelector('button[type="submit"],button:not([type])');if(btn){btn.disabled=true;btn.dataset.originalText=btn.textContent;btn.textContent='处理中…';}});
 function refreshBatchSelection(){var count=document.querySelectorAll('[data-batch-image]:checked').length;var h=document.getElementById('batch-count');var bar=document.querySelector('[data-batch-toolbar]');if(h)h.textContent=count?'已选择 '+count+' 张图片':'请选择图片';if(bar)bar.hidden=!count;return count;}document.addEventListener('change',function(e){if(e.target.matches('[data-batch-image]'))refreshBatchSelection();if(e.target.matches('[data-drop-input]')){var z=e.target.closest('[data-drop-zone]'),h=z&&z.querySelector('[data-file-summary]');if(h)h.textContent=e.target.files.length+' 个文件：'+Array.from(e.target.files).map(function(x){return x.name;}).join('、');}});
-document.addEventListener('click',function(e){var layer=e.target.closest('.lightbox,.drawer');if(layer&&e.target===layer){closeLayer(layer);return;}var batch=e.target.closest('[data-batch-select]');if(batch){e.preventDefault();var checked=batch.dataset.batchSelect==='all';document.querySelectorAll('[data-batch-image]').forEach(function(x){x.checked=checked;});refreshBatchSelection();return;}var c=e.target.closest('[data-close-layer]');if(c){e.preventDefault();closeLayer(document.getElementById(c.dataset.closeLayer));return;}var l=e.target.closest('[data-lightbox-src]');if(l){e.preventDefault();var b=document.getElementById('image-lightbox');b.querySelector('img').src=l.dataset.lightboxSrc;b.querySelector('img').alt=l.dataset.lightboxAlt||'';b._opener=l;b.hidden=false;document.body.style.overflow='hidden';return;}var d=e.target.closest('[data-detail-url]');if(d){e.preventDefault();var x=document.getElementById('image-detail-drawer');x.querySelector('.drawer-content').innerHTML='<p class="muted">正在加载…</p>';x._opener=d;x.hidden=false;document.body.style.overflow='hidden';fetch(d.dataset.detailUrl,{credentials:'same-origin'}).then(function(r){if(!r.ok)throw Error();return r.text();}).then(function(t){x.querySelector('.drawer-content').innerHTML=t;}).catch(function(){x.querySelector('.drawer-content').innerHTML='<p class="alert error" role="alert">详情加载失败，请重试。</p>';});}});
+document.addEventListener('click',function(e){var layer=e.target.closest('.lightbox,.drawer');if(layer&&e.target===layer){closeLayer(layer);return;}var batch=e.target.closest('[data-batch-select]');if(batch){e.preventDefault();var checked=batch.dataset.batchSelect==='all';document.querySelectorAll('[data-batch-image]').forEach(function(x){x.checked=checked;});refreshBatchSelection();return;}var c=e.target.closest('[data-close-layer]');if(c){e.preventDefault();closeLayer(document.getElementById(c.dataset.closeLayer));return;}var l=e.target.closest('[data-lightbox-src]');if(l){e.preventDefault();var b=document.getElementById('image-lightbox');b.querySelector('img').src=l.dataset.lightboxSrc;b.querySelector('img').alt=l.dataset.lightboxAlt||'';b._opener=l;b.hidden=false;document.body.style.overflow='hidden';return;}var d=e.target.closest('[data-detail-url]');if(d){e.preventDefault();var x=document.getElementById('image-detail-drawer');x.querySelector('.drawer-content').innerHTML='<p class="muted">正在加载…</p>';x._opener=d;x.hidden=false;document.body.style.overflow='hidden';fetch(d.dataset.detailUrl,{credentials:'same-origin'}).then(function(r){if(r.redirected&&new URL(r.url,window.location.href).pathname.endsWith('/login')){window.location.assign(r.url);return null;}if(!r.ok)throw Error();return r.text();}).then(function(t){if(t!==null)x.querySelector('.drawer-content').innerHTML=t;}).catch(function(){x.querySelector('.drawer-content').innerHTML='<p class="alert error" role="alert">详情加载失败，请重试。</p>';});}});
 document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeLayer(document.getElementById('image-lightbox'));closeLayer(document.getElementById('image-detail-drawer'));}});
 var initialBatch=document.querySelector('[data-batch-toolbar]');if(initialBatch)initialBatch.hidden=true;var z=document.querySelector('[data-drop-zone]'),i=document.querySelector('[data-drop-input]');if(z&&i){['dragenter','dragover'].forEach(function(n){z.addEventListener(n,function(e){e.preventDefault();z.classList.add('is-dragging');});});['dragleave','drop'].forEach(function(n){z.addEventListener(n,function(e){e.preventDefault();z.classList.remove('is-dragging');});});z.addEventListener('drop',function(e){if(e.dataTransfer.files.length){i.files=e.dataTransfer.files;i.dispatchEvent(new Event('change',{bubbles:true}));}});}
 });})();</script>"""
@@ -408,7 +423,11 @@ def create_admin_router(settings: Any) -> APIRouter:
     sessions: dict[str, _Session] = {}
     previews: dict[str, _Preview] = {}
     failures: dict[str, list[float]] = {}
-    router = APIRouter(prefix=admin_path, tags=["admin-v2"])
+    router = APIRouter(
+        prefix=admin_path,
+        tags=["admin-v2"],
+        route_class=_ClosingFormRoute,
+    )
 
     def clean(now: float | None = None) -> None:
         current = time.time() if now is None else now
@@ -428,85 +447,83 @@ def create_admin_router(settings: Any) -> APIRouter:
 
     def authenticate(request: Request) -> tuple[str, _Session]:
         clean()
+
+        def authentication_failed() -> None:
+            if request.method == "GET":
+                raise HTTPException(
+                    status_code=303,
+                    detail="authentication required",
+                    headers={"Location": f"{admin_path}/login"},
+                )
+            raise HTTPException(401, "authentication required")
+
         raw = request.cookies.get(cookie_name, "")
         try:
             sid, expiry_text, supplied = raw.split(".", 2)
             expiry = int(expiry_text)
         except (ValueError, TypeError):
-            raise HTTPException(401, "authentication required")
+            authentication_failed()
+            raise AssertionError("unreachable")
         expected = hmac.new(signing_key, f"{sid}.{expiry}".encode(), hashlib.sha256).hexdigest()
         if expiry <= int(time.time()) or not hmac.compare_digest(supplied, expected):
-            raise HTTPException(401, "authentication required")
+            authentication_failed()
         session = sessions.get(sid)
         if session is None or session.expires_at <= time.time():
-            raise HTTPException(401, "authentication required")
+            authentication_failed()
         return sid, session
 
     async def form_data(request: Request) -> Any:
+        """Stream form data with a hard total-size limit and disk-spooled files."""
         content_type = request.headers.get("content-type", "")
+        media_type = content_type.partition(";")[0].strip().lower()
         try:
             declared = int(request.headers.get("content-length", "0"))
         except ValueError:
             raise HTTPException(400, "invalid Content-Length")
+        if declared < 0:
+            raise HTTPException(400, "invalid Content-Length")
         if declared > request_max:
             raise HTTPException(413, "request body too large")
-        chunks: list[bytes] = []
-        received = 0
-        try:
+        if not content_type:
+            return FormData()
+
+        stream_limit_message = "request body too large"
+
+        async def limited_stream():
+            received = 0
             async for chunk in request.stream():
                 received += len(chunk)
                 if received > request_max:
-                    raise HTTPException(413, "request body too large")
-                chunks.append(chunk)
+                    raise MultiPartException(stream_limit_message)
+                yield chunk
+
+        try:
+            if media_type == "multipart/form-data":
+                parsed = await MultiPartParser(
+                    request.headers,
+                    limited_stream(),
+                    max_files=1000,
+                    max_fields=1000,
+                    max_part_size=upload_max,
+                ).parse()
+            elif media_type == "application/x-www-form-urlencoded":
+                parsed = await FormParser(
+                    request.headers,
+                    limited_stream(),
+                    max_fields=1000,
+                    max_part_size=upload_max,
+                ).parse()
+            else:
+                raise HTTPException(415, "unsupported form content type")
+            request._form = parsed
+            return parsed
         except HTTPException:
             raise
+        except MultiPartException as exc:
+            status = 413 if exc.message == stream_limit_message else 400
+            raise HTTPException(status, exc.message) from exc
         except Exception as exc:
-            raise HTTPException(400, "cannot read request body") from exc
-        body = b"".join(chunks)
-        if not body and not content_type:
-            return FormData()
-        if content_type.lower().startswith("application/x-www-form-urlencoded"):
-            try:
-                return FormData(parse_qsl(body.decode("utf-8"), keep_blank_values=True))
-            except (UnicodeDecodeError, ValueError) as exc:
-                raise HTTPException(400, "invalid URL-encoded form") from exc
-        if content_type.lower().startswith("multipart/form-data"):
-            try:
-                message = BytesParser(policy=email_policy).parsebytes(
-                    b"Content-Type: " + content_type.encode("latin-1") + b"\r\nMIME-Version: 1.0\r\n\r\n" + body
-                )
-                if not message.is_multipart():
-                    raise ValueError("multipart boundary missing")
-                items: list[tuple[str, str | UploadFile]] = []
-                for part in message.iter_parts():
-                    if part.get_content_disposition() != "form-data":
-                        continue
-                    name = part.get_param("name", header="content-disposition")
-                    if not name:
-                        raise ValueError("form field name missing")
-                    payload = part.get_payload(decode=True)
-                    if payload is None:
-                        payload = b""
-                    filename = part.get_filename()
-                    if filename is None:
-                        charset = part.get_content_charset("utf-8")
-                        items.append((name, payload.decode(charset)))
-                    else:
-                        items.append(
-                            (
-                                name,
-                                UploadFile(
-                                    file=io.BytesIO(payload),
-                                    filename=filename,
-                                    headers={"content-type": part.get_content_type()},
-                                ),
-                            )
-                        )
-                return FormData(items)
-            except HTTPException:
-                raise
-            except (UnicodeDecodeError, LookupError, ValueError, TypeError) as exc:
-                raise HTTPException(400, "invalid multipart form") from exc
+            raise HTTPException(400, "cannot read form data") from exc
         raise HTTPException(415, "unsupported form content type")
 
     async def write_auth(request: Request) -> tuple[str, _Session, Any]:
@@ -1189,19 +1206,30 @@ def create_admin_router(settings: Any) -> APIRouter:
         token = secrets.token_urlsafe(32)
         path = upload_tmp_dir / f"{token}{suffix}"
         try:
-            payload = await uploaded.read(limits.max_archive_bytes + 1)
-            if len(payload) > limits.max_archive_bytes:
-                raise HTTPException(413, "archive too large")
+            archive_size = 0
+            archive_hash = hashlib.sha256()
             with path.open("xb") as handle:
-                handle.write(payload); handle.flush(); os.fsync(handle.fileno())
+                while True:
+                    chunk = await uploaded.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    archive_size += len(chunk)
+                    if archive_size > limits.max_archive_bytes:
+                        raise HTTPException(413, "archive too large")
+                    archive_hash.update(chunk)
+                    handle.write(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if archive_size == 0:
+                raise HTTPException(400, "archive is empty")
             summary = importer.import_archive(path, settings.images_dir, dry_run=True, square_policy=settings.square_policy, limits=limits)
             entries = _archive_entries(path, limits)
             previews[token] = _Preview(
                 sid,
                 path,
                 time.time() + preview_ttl,
-                len(payload),
-                hashlib.sha256(payload).hexdigest(),
+                archive_size,
+                archive_hash.hexdigest(),
                 summary.to_dict(),
                 entries,
             )
@@ -1217,12 +1245,25 @@ def create_admin_router(settings: Any) -> APIRouter:
             for hint in hints
         )
         default_value = _slugify(str(getattr(settings, "admin_import_default_tag", "imported")))
+        with db.get_conn(settings.database_path) as conn:
+            tag_rows = conn.execute(
+                "SELECT slug,display_name FROM tags WHERE enabled=1 ORDER BY slug"
+            ).fetchall()
+        tag_choices = "".join(
+            f'<label><input type="checkbox" name="tags" value="{_escape(row["slug"])}"> '
+            f'{_escape(row["display_name"])} — {_escape(row["slug"])}</label><br>'
+            for row in tag_rows
+            if str(row["slug"]).lower() != default_value.lower()
+        )
+        if not tag_choices:
+            tag_choices = f'<p class="muted">没有可追加的标签，可先到 <a href="{admin_path}/tags">标签工作台</a> 创建。</p>'
         body = (
             f"<pre>{_escape(summary.to_dict())}</pre>"
             f'<form method="post" action="{admin_path}/archives/confirm">{hidden(_session.csrf)}'
             f'<input type="hidden" name="token" value="{_escape(token)}">'
             f'<input type="hidden" name="map_dirs_present" value="1">'
             f'<label>默认标签 <input name="default_tag" value="{_escape(default_value)}"></label><br>'
+            f'<fieldset><legend>追加标签（可多选）</legend>{tag_choices}</fieldset>'
             f'{choices}<button>确认导入</button></form>'
         )
         return _page("归档预览", body, _session.csrf)
@@ -1241,7 +1282,11 @@ def create_admin_router(settings: Any) -> APIRouter:
             raise HTTPException(403, "preview belongs to another session")
         try:
             current_size = pending.archive_path.stat().st_size
-            current_hash = hashlib.sha256(pending.archive_path.read_bytes()).hexdigest()
+            current_digest = hashlib.sha256()
+            with pending.archive_path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    current_digest.update(chunk)
+            current_hash = current_digest.hexdigest()
         except OSError as exc:
             previews.pop(token, None)
             pending.archive_path.unlink(missing_ok=True)
@@ -1251,7 +1296,12 @@ def create_admin_router(settings: Any) -> APIRouter:
             pending.archive_path.unlink(missing_ok=True)
             raise HTTPException(400, "preview archive changed")
         try:
-            default_slug = db.validate_slug(str(form.get("default_tag", getattr(settings, "admin_import_default_tag", "imported"))))
+            if "default_tag" not in form:
+                form = FormData([
+                    *form.multi_items(),
+                    ("default_tag", str(getattr(settings, "admin_import_default_tag", "imported"))),
+                ])
+            selected_slugs = _selected_tag_slugs(form)
             available_hints = {hint for _digest, hint in pending.entries if hint}
             if str(form.get("map_dirs_present", "")) == "1":
                 selected_hints = {db.validate_slug(str(value)) for value in form.getlist("map_dirs")}
@@ -1265,7 +1315,7 @@ def create_admin_router(settings: Any) -> APIRouter:
             raise HTTPException(400, str(exc)) from exc
         with db.get_conn(settings.database_path) as conn:
             try:
-                default_id = _require_existing_tags(conn, [default_slug])[default_slug]
+                selected_tag_ids = list(_require_existing_tags(conn, selected_slugs).values())
             except ValueError as exc:
                 previews.pop(token, None)
                 pending.archive_path.unlink(missing_ok=True)
@@ -1279,7 +1329,11 @@ def create_admin_router(settings: Any) -> APIRouter:
                     row = conn.execute("SELECT id FROM images WHERE content_hash=?", (digest,)).fetchone()
                     if row is None:
                         continue
-                    conn.execute("INSERT OR IGNORE INTO image_tags(image_id,tag_id,created_at) VALUES(?,?,?)", (row["id"], default_id, db.utc_now()))
+                    for tag_id in selected_tag_ids:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO image_tags(image_id,tag_id,created_at) VALUES(?,?,?)",
+                            (row["id"], tag_id, db.utc_now()),
+                        )
                     if hint and hint in selected_hints:
                         hint_id = db.ensure_tag(conn, hint)
                         conn.execute("INSERT OR IGNORE INTO image_tags(image_id,tag_id,created_at) VALUES(?,?,?)", (row["id"], hint_id, db.utc_now()))

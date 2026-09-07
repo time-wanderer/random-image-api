@@ -2,9 +2,9 @@
 
 ## 1. 报告范围
 
-本报告记录 Random Image API V2.2 文档、当前本地实现与正式发布状态。当前正式版本为 V2.2.1；V2.2 保留 V1/V2 API、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、tags 和主题接口，重点优化管理 UI、图片预览、物理目录整理与标签编辑。
+本报告记录 Random Image API V2.2 文档、当前实现与发布状态。当前源码版本为 V2.2.2；V2.2 保留 V1/V2 API、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、tags 和主题接口，重点优化管理 UI、图片预览、物理目录整理与标签编辑。
 
-V2.2.1 本地与远程一次性测试容器的完整测试均为 `83 passed`，正式发布镜像在发布前已通过隔离构建、运行及真实 HTTP/HTML 管理流程验收。`qinlingmonkey/random-image-api:v2` 已正式发布为版本 `2.2.1`、平台 `linux/amd64`；发布后独立回读确认 Manifest/Registry 摘要为 `sha256:bd1dc2e6fa5b0882cb9fb3d6bf8816d2f175e7bd05624b3140544d9efefbbda8`，Config 摘要为 `sha256:1088deae369cf6e5a3e370dc4beaf7399b672cb6988ec5686cd9d3b316956633`，共 12 层，Entrypoint 为 `/usr/local/bin/docker-entrypoint.sh`。源码功能提交 `c32b1d1426b70c4b10b7435a8aa7a55d0fd6907b` 已同步 GitHub `main`。V2.2.0 的摘要只作为历史记录；`v1` 继续保留用于旧部署与回滚。本次文档收尾未提交、推送或远程连接；Docker Hub 线上 Overview 尚待本轮工具同步，本文不声称其已同步。
+V2.2.2 修复命令行归档导入无法打标签、网页压缩包上传内存与临时文件生命周期、多标签归档关联，以及管理会话失效后 HTML 页面不返回登录页的问题。最终候选镜像完整测试为 `88 passed`，远程健康检查、未登录 HTML `GET` 的 `303` 登录回退和 Uvicorn PID 1 UID `1000` 均通过；测试后原有 10 个容器快照一致，隔离容器、镜像和目录已清理。Docker Hub `qinlingmonkey/random-image-api:v2` 当前仍为已发布的 V2.2.1、平台 `linux/amd64`，其 Manifest/Registry 摘要为 `sha256:bd1dc2e6fa5b0882cb9fb3d6bf8816d2f175e7bd05624b3140544d9efefbbda8`，Config 摘要为 `sha256:1088deae369cf6e5a3e370dc4beaf7399b672cb6988ec5686cd9d3b316956633`。本轮先同步 V2.2.2 源码，不把尚未发布的镜像描述为 V2.2.2；长期复用 SSH 密钥按约定保留。
 
 ## 2. 信息来源与调研说明
 
@@ -162,7 +162,22 @@ V2.2 新增或完善：
 - 本轮仅执行真实 HTTP/HTML 管理流程验收，未执行浏览器视觉验收，不据此声称视觉验收通过；
 - 远程测试复用既有长期 SSH 密钥并按约定保留，未因本轮清理撤销或删除；
 - 发布后通过独立回读确认 `qinlingmonkey/random-image-api:v2` 为版本 `2.2.1`、平台 `linux/amd64`，Manifest/Registry 摘要为 `sha256:bd1dc2e6fa5b0882cb9fb3d6bf8816d2f175e7bd05624b3140544d9efefbbda8`，Config 摘要为 `sha256:1088deae369cf6e5a3e370dc4beaf7399b672cb6988ec5686cd9d3b316956633`，共 12 层，Entrypoint 为 `/usr/local/bin/docker-entrypoint.sh`；源码功能提交 `c32b1d1426b70c4b10b7435a8aa7a55d0fd6907b` 已同步 GitHub `main`；
-- 本次文档收尾不修改代码或测试，未提交、推送或远程连接；Docker Hub 线上 Overview 尚待本轮工具同步，不声称线上文案已经更新。
+- 最终文档收尾未修改代码或测试；发布文档已提交并推送，Docker Hub 线上 Overview 已同步并完成正文长度与 SHA-256 一致性校验。
+
+### 6.4.2 V2.2.2 上传、标签与会话修复
+
+- 命令行 importer 新增可重复使用的 `--tag`，并要求同时传入 `--database-path`；多个标签在一个 SQLite 事务中写入，重复 slug 会去重，`--dry-run` 不创建数据库或图片文件；
+- 标签实体与关系仅保存在 SQLite 的 `tags`、`image_tags` 和 `webdav_object_tags` 表中，不写入图片；本地图片按内容哈希关联，WebDAV 对象按标准化 HREF 关联；
+- 网页归档确认支持默认标签、多个已存在标签和可选目录标签，并在同一 SQLite 事务中创建关系；
+- 管理端改用固定版本 `python-multipart==0.0.22` 与 `starlette==1.6.0` 的流式 multipart 解析。上传文件通过 `SpooledTemporaryFile` 进入磁盘 spool，归档以 1 MiB 分块写入并计算 SHA-256，请求结束时确定性关闭表单中的上传文件；
+- 请求总量、单图、归档大小、成员数量、单成员大小、解压总量、压缩比和图片像素限制继续生效；超限、损坏或空归档会返回安全错误并删除临时文件；
+- HTML `GET` 在 Cookie 无效、签名错误、过期或服务端会话不存在时返回 `303` 到 `/manage-images/login`；`POST` 等写请求保持 `401`，避免重定向重放写操作；
+- 独立审查发现并修复两项高优先级异常路径：multipart 临时文件未确定性关闭，以及归档在第二个 `os.replace()` 失败时可能留下第一个已提交文件。新增故障注入测试确认只撤销本次新建文件；
+- 最终 V2.2.2 工作树重新构建后，远程候选镜像完整测试为 `88 passed`；`/health` 返回版本 `2.2.2`，管理登录回退和 PID 1 UID `1000` 通过；原有 10 个容器前后快照一致，隔离容器、镜像和目录已清理；
+- 本轮没有执行浏览器视觉验收，不据 HTTP/HTML 合同检查声称视觉验收通过；
+- 当前 Docker Hub `v2` 仍是 V2.2.1。本轮用户要求范围为远程测试和源码推送，尚未执行 V2.2.2 镜像发布或线上 Overview 同步。
+
+本轮创建或修改的文件包括 `app/__init__.py`、`app/admin.py`、`app/importer.py`、`requirements.txt`、`tests/test_api.py`、`tests/test_admin.py`、`tests/test_importer.py`、`README.md`、`MIGRATION.md`、`REPORT.md` 和 `DOCKERHUB_OVERVIEW.md`。未修改 `.env`、业务图片、数据库、日志、缓存、备份包或现有远程服务。
 
 ### 6.5 V2.2 远程隔离 Docker 验收
 

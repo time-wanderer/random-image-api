@@ -2,6 +2,7 @@
 
 Random Image API V2 是 V1 的**向后兼容扩展**：保留 V1 的 `GET /random`、`?type=`、本地图库、WebDAV Hybrid、默认 90% 远程优先、缓存、归档 importer、Backup / Restore，并新增主题标签和安全管理 UI。V2.2 在不改变 API 和数据库 schema 的前提下，重点优化管理网页与本地图片整理体验。
 
+> 当前源码版本：V2.2.2。本次补丁增加命令行归档导入多标签、网页归档多标签、multipart 流式磁盘 spool 与确定性资源清理，以及管理会话失效后的登录页回退；远程隔离候选镜像完整测试为 `88 passed`，健康检查、PID 1 UID `1000` 和未登录页面 `303` 回退均通过。Docker Hub `qinlingmonkey/random-image-api:v2` 当前仍为已发布的 V2.2.1（`linux/amd64`），其 Manifest/Registry 摘要为 `sha256:bd1dc2e6fa5b0882cb9fb3d6bf8816d2f175e7bd05624b3140544d9efefbbda8`，Config 摘要为 `sha256:1088deae369cf6e5a3e370dc4beaf7399b672cb6988ec5686cd9d3b316956633`。`v1` 继续保留用于旧部署与回滚。
 
 V1 快照见 [docs/V1.md](docs/V1.md)，V1 原地升级和 VPS 迁移见 [MIGRATION.md](MIGRATION.md)。
 
@@ -211,9 +212,16 @@ curl -fsS -X POST \
 ```bash
 python -m app.importer /path/to/images.zip --images-dir ./data/images --dry-run
 python -m app.importer /path/to/images.zip --images-dir ./data/images
+python -m app.importer /path/to/images.zip \
+  --images-dir ./data/images \
+  --database-path ./data/database/images.db \
+  --tag nature \
+  --tag featured
 ```
 
-它会先验证归档成员、路径、大小和压缩比，再识别真实图片格式、方向并按内容去重。V2 管理 UI 提供更安全易用的 preview-confirm 流程，见下文。
+`--tag` 可重复传入，一次为本次归档涉及的图片关联多个标签；使用 `--tag` 时必须同时提供 `--database-path`。标签及图片关系保存在 SQLite 的 `tags`、`image_tags` 和 `webdav_object_tags` 表中，不写入图片文件。本地图片以内容哈希识别，WebDAV 对象以标准化 HREF 关联，因此不会依赖文件显示顺序关联标签。
+
+Importer 会先验证归档成员、路径、大小和压缩比，再识别真实图片格式、方向并按内容去重。文件提交或 SQLite 标签事务失败时，会撤销本次新建文件；导入前已存在的重复图片不会被删除。V2 管理 UI 提供更安全易用的 preview-confirm 流程，见下文。
 
 ## 6. WebDAV Hybrid
 
@@ -281,7 +289,9 @@ ADMIN_PAGE_SIZE=20
 
 - 未配置 `ADMIN_TOKEN` 时，旧管理 API 隐藏为 `404`；管理 UI 登录也依赖管理凭据。
 - 登录有限速；会话 Cookie 为 HttpOnly、SameSite=Strict，并由会话密钥签名。
+- 管理会话失效后，HTML `GET` 请求返回 `303` 并跳转到 `/manage-images/login`；`POST` 等写请求仍返回 `401`，不会通过重定向重放写操作。
 - 所有写操作要求 CSRF token；页面输出进行 HTML 转义。
+- 图片和归档使用 `python-multipart` 流式解析，文件部分通过磁盘 spool 处理，并设置请求、单图、归档成员和归档总量限制；请求结束时会确定性关闭上传临时文件。
 - 会话和待确认归档 preview 保存在单进程内存中；重启会退出登录并使 preview 失效。
 - 生产环境应在 HTTPS 反向代理后使用，不要公开 Token、Cookie 或 WebDAV 凭据。
 
@@ -345,8 +355,8 @@ python -m compileall -q app tests
 bash -n scripts/*.sh docker-entrypoint.sh
 ```
 
-V2.2.1 本地及远程一次性测试容器的完整测试均为 `83 passed`，正式发布镜像在发布前已完成隔离构建与真实 HTTP/HTML 管理流程验收。生产镜像按精简设计只安装运行依赖，不内置 `pytest`；一次性测试容器另行提供开发测试依赖。由于生产镜像显式设置 `CACHE_DIR=/app/data/cache/webdav`，运行测试时必须对 pytest 进程使用 `env -u CACHE_DIR`，使配置测试能够验证“未显式配置缓存目录时，缓存目录随临时 `DATA_DIR` 派生”的行为；这不会改变正式容器的生产配置。本轮未执行浏览器视觉验收。
+V2.2.2 最终候选镜像的完整测试为 `88 passed`。本轮还执行了 Python `compileall`、Shell 语法和 `git diff --check`，并完成远程隔离运行态验收：`/health` 正常，Uvicorn PID 1 的 UID 为 `1000`，未登录访问管理 HTML 页面返回 `303` 并定位到 `/manage-images/login`。原有 10 个容器前后快照一致，测试容器、候选镜像和临时目录均已清理。生产镜像按精简设计只安装运行依赖，不内置 `pytest`；测试进程使用 `env -u CACHE_DIR`，仅用于验证缓存目录的未配置默认行为。本轮未执行浏览器视觉验收。
 
-V2.2.1 Docker Registry/Config 摘要已在正式发布后独立回读确认；Docker Hub 线上 Overview 尚待本轮工具同步。
+Docker Hub `v2` 当前仍为已发布的 V2.2.1；其 Registry/Config 摘要已经独立回读确认。V2.2.2 本轮先同步源码，不把尚未发布的 Docker 镜像描述为已发布。
 
 当前 V2 实施与验证记录见 [REPORT.md](REPORT.md)。

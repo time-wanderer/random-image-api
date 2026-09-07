@@ -11,6 +11,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
+from starlette.datastructures import FormData
 
 from app import db
 from app.admin import create_admin_router
@@ -119,7 +120,9 @@ def preview(client: TestClient, csrf: str, payload: bytes, name: str = "photos.z
 def test_auth_cookie_tamper_csrf_logout_and_xss(admin_env) -> None:
     settings, app = admin_env
     with new_client(app) as client:
-        assert client.get(ADMIN).status_code == 401
+        unauthenticated = client.get(f"{ADMIN}/images", follow_redirects=False)
+        assert unauthenticated.status_code == 303
+        assert unauthenticated.headers["location"] == f"{ADMIN}/login"
         login_response = client.post(f"{ADMIN}/login", data={"token": "correct horse"}, follow_redirects=False)
         cookie = login_response.headers["set-cookie"].lower()
         assert "httponly" in cookie
@@ -137,11 +140,16 @@ def test_auth_cookie_tamper_csrf_logout_and_xss(admin_env) -> None:
         assert "<script>alert(1)</script>" not in tags.text
 
         assert client.post(f"{ADMIN}/logout", data={"csrf": csrf}, follow_redirects=False).status_code == 303
-        assert client.get(ADMIN).status_code == 401
+        expired = client.get(f"{ADMIN}/images", follow_redirects=False)
+        assert expired.status_code == 303
+        assert expired.headers["location"] == f"{ADMIN}/login"
+        assert client.post(f"{ADMIN}/tags", data={"csrf": csrf}).status_code == 401
 
     with new_client(app) as attacker:
         attacker.cookies.set(settings.admin_cookie_name, "fake.9999999999.bad", path=ADMIN)
-        assert attacker.get(ADMIN).status_code == 401
+        tampered = attacker.get(f"{ADMIN}/images", follow_redirects=False)
+        assert tampered.status_code == 303
+        assert tampered.headers["location"] == f"{ADMIN}/login"
 
 
 def test_per_ip_login_rate_limit(admin_env) -> None:
@@ -201,24 +209,48 @@ def test_archive_preview_does_not_write_then_confirm_imports_and_maps_tags(admin
         before_files = list(settings.images_dir.rglob("*"))
         with db.get_conn(settings.database_path) as conn:
             before_rows = int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0])
-        assert client.post(f"{ADMIN}/tags", data={"csrf": csrf, "slug": "imported", "display_name": "Imported"}, follow_redirects=False).status_code == 303
+        for slug in ("imported", "featured", "seasonal"):
+            assert client.post(
+                f"{ADMIN}/tags",
+                data={"csrf": csrf, "slug": slug, "display_name": slug.title()},
+                follow_redirects=False,
+            ).status_code == 303
         token, response = preview(client, csrf, payload)
         assert "dry_run" in response.text
+        assert "追加标签（可多选）" in response.text
+        assert 'name="tags" value="featured"' in response.text
+        assert 'name="tags" value="seasonal"' in response.text
         assert list(settings.images_dir.rglob("*")) == before_files
         with db.get_conn(settings.database_path) as conn:
             assert int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]) == before_rows
         temporary = list(settings.upload_tmp_dir.iterdir())
         assert len(temporary) == 1
 
-        confirmed = client.post(f"{ADMIN}/archives/confirm", data={"csrf": csrf, "token": token}, follow_redirects=False)
+        confirmed = client.post(
+            f"{ADMIN}/archives/confirm",
+            data={
+                "csrf": csrf,
+                "token": token,
+                "default_tag": "imported",
+                "tags": ["featured", "seasonal", "featured"],
+            },
+            follow_redirects=False,
+        )
         assert confirmed.status_code == 303, confirmed.text
         assert not list(settings.upload_tmp_dir.iterdir())
         with db.get_conn(settings.database_path) as conn:
             assert int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]) == 2
             slugs = {row[0] for row in conn.execute("SELECT slug FROM tags")}
-            assert {"imported", "animals"} <= slugs
-            cat_tags = {row[0] for row in conn.execute("SELECT t.slug FROM images i JOIN image_tags it ON it.image_id=i.id JOIN tags t ON t.id=it.tag_id WHERE i.orientation='desktop'")}
-            assert {"imported", "animals"} <= cat_tags
+            assert {"imported", "featured", "seasonal", "animals"} <= slugs
+            rows = conn.execute(
+                "SELECT i.orientation,t.slug FROM images i "
+                "JOIN image_tags it ON it.image_id=i.id JOIN tags t ON t.id=it.tag_id"
+            ).fetchall()
+            tags_by_orientation: dict[str, set[str]] = {}
+            for row in rows:
+                tags_by_orientation.setdefault(str(row[0]), set()).add(str(row[1]))
+            assert {"imported", "featured", "seasonal", "animals"} <= tags_by_orientation["desktop"]
+            assert {"imported", "featured", "seasonal"} <= tags_by_orientation["mobile"]
 
 
 def test_archive_preview_is_bound_to_session_and_logout_cleans_temp(admin_env) -> None:
@@ -263,6 +295,48 @@ def test_malicious_archive_rejected_without_images_db_or_temp_residue(admin_env)
         assert response.status_code == 400
         assert not list(settings.images_dir.rglob("*.*"))
         assert not list(settings.upload_tmp_dir.glob("*"))
+        with db.get_conn(settings.database_path) as conn:
+            assert int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]) == 0
+
+
+def test_multipart_form_is_closed_after_upload_request(
+    admin_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _settings, app = admin_env
+    closed: list[bool] = []
+    original_close = FormData.close
+
+    async def recording_close(form: FormData) -> None:
+        closed.append(True)
+        await original_close(form)
+
+    monkeypatch.setattr(FormData, "close", recording_close)
+    with new_client(app) as client:
+        csrf = login(client)
+        response = client.post(
+            f"{ADMIN}/upload",
+            data={"csrf": csrf},
+            files={"file": ("closed.png", image_bytes(), "image/png")},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+    assert closed
+
+
+def test_oversized_archive_is_rejected_without_temp_or_data_residue(admin_env) -> None:
+    settings, app = admin_env
+    oversized = b"x" * (settings.admin_max_archive_bytes + 1)
+    with new_client(app) as client:
+        csrf = login(client)
+        response = client.post(
+            f"{ADMIN}/archives/preview",
+            data={"csrf": csrf},
+            files={"archive": ("oversized.zip", oversized, "application/zip")},
+        )
+        assert response.status_code == 413
+        assert not list(settings.upload_tmp_dir.glob("*"))
+        assert not list(settings.images_dir.rglob("*.*"))
         with db.get_conn(settings.database_path) as conn:
             assert int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]) == 0
 
@@ -405,7 +479,12 @@ def test_v21_masonry_preview_auth_square_upload_and_symlink_rejection(admin_env)
     settings, app = admin_env
     square = image_bytes("PNG", (32, 32))
     with new_client(app) as client:
-        assert client.get(f"{ADMIN}/images/1/preview").status_code == 401
+        unauthenticated_preview = client.get(
+            f"{ADMIN}/images/1/preview",
+            follow_redirects=False,
+        )
+        assert unauthenticated_preview.status_code == 303
+        assert unauthenticated_preview.headers["location"] == f"{ADMIN}/login"
         csrf = login(client)
         uploaded = client.post(
             f"{ADMIN}/upload",

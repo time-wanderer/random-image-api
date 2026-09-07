@@ -14,13 +14,14 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import stat
 import sys
 import tarfile
 import tempfile
 import warnings
 import zipfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Iterator, Literal
 
@@ -65,9 +66,14 @@ class ImportSummary:
     mobile: int = 0
     square: int = 0
     bytes_read: int = 0
+    tag_targets: list[dict[str, object]] = field(default_factory=list, repr=False)
+    created_paths: list[str] = field(default_factory=list, repr=False)
 
     def to_dict(self) -> dict[str, object]:
-        return asdict(self)
+        payload = asdict(self)
+        payload.pop("tag_targets", None)
+        payload.pop("created_paths", None)
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +304,22 @@ def import_archive(
                 target_group = _destination_orientation(orientation, square_policy)
                 digest = hashlib.sha256(payload).hexdigest()
                 target = destination / target_group / f"{digest}{_FORMAT_EXTENSIONS[detected]}"
+                target_record: dict[str, object] = {
+                    "rel_path": target.relative_to(destination).as_posix(),
+                    "width": width,
+                    "height": height,
+                    "orientation": orientation,
+                    "format": detected.lower(),
+                    "content_type": {
+                        "JPEG": "image/jpeg",
+                        "PNG": "image/png",
+                        "WEBP": "image/webp",
+                    }[detected],
+                    "file_size": len(payload),
+                    "content_hash": digest,
+                }
+                if not any(item["rel_path"] == target_record["rel_path"] for item in summary.tag_targets):
+                    summary.tag_targets.append(target_record)
                 identity = (target_group, digest)
                 if identity in seen or target.is_file():
                     summary.duplicates += 1
@@ -314,9 +336,18 @@ def import_archive(
                     staged.append((staged_file, target))
 
         if not dry_run:
-            for staged_file, target in staged:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(staged_file, target)
+            committed: list[Path] = []
+            try:
+                for staged_file, target in staged:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(staged_file, target)
+                    committed.append(target)
+                    summary.created_paths.append(str(target))
+            except Exception:
+                for target in reversed(committed):
+                    target.unlink(missing_ok=True)
+                summary.created_paths.clear()
+                raise
         return summary
     finally:
         if staging is not None:
@@ -327,7 +358,9 @@ def _parser() -> argparse.ArgumentParser:
     defaults = ImportLimits()
     parser = argparse.ArgumentParser(description="Securely import image archives")
     parser.add_argument("archive", type=Path)
-    parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--output-dir", "--images-dir", dest="output_dir", required=True, type=Path)
+    parser.add_argument("--database-path", type=Path, help="SQLite database used to store tag relations")
+    parser.add_argument("--tag", action="append", default=[], metavar="SLUG", help="Tag slug to assign; repeat for multiple tags")
     parser.add_argument("--square-policy", choices=("both", "desktop", "mobile"), default="both")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--json", action="store_true", dest="json_output")
@@ -350,6 +383,27 @@ def _human_summary(summary: ImportSummary) -> str:
     )
 
 
+def _tag_imported_images(database_path: Path, output_dir: Path, summary: ImportSummary, values: list[str]) -> None:
+    """Atomically index and tag only images represented by this archive."""
+    from app import db
+
+    slugs = list(dict.fromkeys(db.validate_slug(value) for value in values))
+    with db.get_conn(database_path) as conn:
+        tag_ids = [db.ensure_tag(conn, slug) for slug in slugs]
+        for record in summary.tag_targets:
+            target = output_dir / str(record["rel_path"])
+            if not target.is_file():
+                continue
+            image_record = dict(record)
+            image_record["mtime_ns"] = target.stat().st_mtime_ns
+            image_id = db.upsert_image(conn, image_record)
+            for tag_id in tag_ids:
+                conn.execute(
+                    "INSERT OR IGNORE INTO image_tags(image_id,tag_id,created_at) VALUES(?,?,?)",
+                    (image_id, tag_id, db.utc_now()),
+                )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
@@ -361,7 +415,15 @@ def main(argv: list[str] | None = None) -> int:
         max_compression_ratio=args.max_compression_ratio,
         max_image_pixels=args.max_image_pixels,
     )
+    summary: ImportSummary | None = None
     try:
+        if args.tag and args.database_path is None:
+            raise ValueError("--database-path is required when --tag is used")
+        if args.tag:
+            from app import db
+
+            for value in args.tag:
+                db.validate_slug(value)
         summary = import_archive(
             args.archive,
             args.output_dir,
@@ -369,7 +431,12 @@ def main(argv: list[str] | None = None) -> int:
             square_policy=args.square_policy,
             limits=limits,
         )
-    except (ImportErrorBase, ValueError) as exc:
+        if args.tag and not args.dry_run:
+            _tag_imported_images(args.database_path, args.output_dir, summary, args.tag)
+    except (ImportErrorBase, ValueError, OSError, sqlite3.Error) as exc:
+        if summary is not None:
+            for created_path in summary.created_paths:
+                Path(created_path).unlink(missing_ok=True)
         if args.json_output:
             print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         else:
