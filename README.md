@@ -2,7 +2,7 @@
 
 Random Image API V2 是 V1 的**向后兼容扩展**：保留 V1 的 `GET /random`、`?type=`、本地图库、WebDAV Hybrid、默认 90% 远程优先、缓存、归档 importer、Backup / Restore，并新增主题标签和安全管理 UI。V2.2 在不改变 API 和数据库 schema 的前提下，重点优化管理网页与本地图片整理体验。
 
-> 当前版本：V2.2.2。本次补丁增加命令行归档导入多标签、网页归档多标签、multipart 流式磁盘 spool 与确定性资源清理，以及管理会话失效后的登录页回退；远程隔离候选镜像完整测试为 `88 passed`，健康检查、PID 1 UID `1000` 和未登录页面 `303` 回退均通过。Docker Hub `qinlingmonkey/random-image-api:v2` 已发布为 V2.2.2（`linux/amd64`），独立回读确认 Manifest/Registry 摘要为 `sha256:7ca9a5958242417a0b1f9b5b5609a437f8158db55ab5323e989adcd098d0ae2f`，Config 摘要为 `sha256:0c1a92c610d5af76bb115f8ceab8d4b70f10be778ee5cef6b0843b7b83267ef3`，共 12 层，Entrypoint 为 `/usr/local/bin/docker-entrypoint.sh`；源码功能提交 `d8752a0321404d8ad7ec2cfa3e2c8d06bf9bbd2b` 已同步 GitHub `main`。`v1` 继续保留用于旧部署与回滚。
+> 当前候选源码版本：V2.2.3，已完成远程隔离构建、93 项 Python 测试及运行态验收，等待本轮 GitHub 与 Docker Hub 发布。本补丁为普通图片和归档上传增加客户端类型/大小校验、归档真实上传进度和代理错误恢复，并让归档 preview 保留上传前选择的标签。Docker Hub `qinlingmonkey/random-image-api:v2` 在本轮发布前仍为 V2.2.2（`linux/amd64`）；`v1` 继续保留用于旧部署与回滚。
 
 V1 快照见 [docs/V1.md](docs/V1.md)，V1 原地升级和 VPS 迁移见 [MIGRATION.md](MIGRATION.md)。
 
@@ -219,7 +219,19 @@ python -m app.importer /path/to/images.zip \
   --tag featured
 ```
 
-`--tag` 可重复传入，一次为本次归档涉及的图片关联多个标签；使用 `--tag` 时必须同时提供 `--database-path`。标签及图片关系保存在 SQLite 的 `tags`、`image_tags` 和 `webdav_object_tags` 表中，不写入图片文件。本地图片以内容哈希识别，WebDAV 对象以标准化 HREF 关联，因此不会依赖文件显示顺序关联标签。
+CLI 已支持 ZIP、TAR.GZ、TGZ、多次 `--tag` 和 `--database-path`，但只处理归档，不直接接受目录。`--tag` 可重复传入，一次为本次归档涉及的所有图片关联多个标签；使用 `--tag` 时必须同时提供 `--database-path`。标签及图片关系保存在 SQLite 的 `tags`、`image_tags` 和 `webdav_object_tags` 表中，不写入图片文件。本地图片以内容哈希识别，WebDAV 对象以标准化 HREF 关联，因此不会依赖文件显示顺序关联标签。
+
+文件夹请先打包后再运行 CLI：
+
+```bash
+tar -czf /tmp/photos.tar.gz -C /path/to photos
+python -m app.importer /tmp/photos.tar.gz \
+  --output-dir ./data/images \
+  --database-path ./data/database/images.db \
+  --tag nature --tag featured
+```
+
+也可直接把图片复制到 `data/images/{desktop,mobile,square}/` 后触发 `POST /admin/rescan`。目录标签映射来自归档成员的父目录，网页预览页可复核修改；网页上传前选择的标签应用于本次所有图片。
 
 Importer 会先验证归档成员、路径、大小和压缩比，再识别真实图片格式、方向并按内容去重。文件提交或 SQLite 标签事务失败时，会撤销本次新建文件；导入前已存在的重复图片不会被删除。V2 管理 UI 提供更安全易用的 preview-confirm 流程，见下文。
 
@@ -283,7 +295,9 @@ ADMIN_MAX_UPLOAD_BYTES=26214400
 ADMIN_PAGE_SIZE=20
 ```
 
-归档限制还可通过 `ADMIN_MAX_ARCHIVE_BYTES`、`ADMIN_MAX_ARCHIVE_MEMBERS`、`ADMIN_MAX_ARCHIVE_MEMBER_BYTES`、`ADMIN_MAX_ARCHIVE_TOTAL_BYTES`、`ADMIN_MAX_ARCHIVE_COMPRESSION_RATIO` 调整；图片像素上限使用 `ADMIN_MAX_IMAGE_PIXELS`，临时目录使用 `UPLOAD_TMP_DIR`，归档默认标签可用 `ADMIN_IMPORT_DEFAULT_TAG` 设置。
+归档限制还可通过 `ADMIN_MAX_ARCHIVE_BYTES`、`ADMIN_MAX_ARCHIVE_MEMBERS`、`ADMIN_MAX_ARCHIVE_MEMBER_BYTES`、`ADMIN_MAX_ARCHIVE_TOTAL_BYTES`、`ADMIN_MAX_ARCHIVE_COMPRESSION_RATIO` 调整；默认 `ADMIN_MAX_ARCHIVE_BYTES=536870912`（512 MiB），本补丁没有提高该值。图片像素上限使用 `ADMIN_MAX_IMAGE_PIXELS`，临时目录使用 `UPLOAD_TMP_DIR`。
+
+若站点经过 Cloudflare，网页实际上传上限取应用 `ADMIN_MAX_ARCHIVE_BYTES`、Cloudflare 当前计划上限及站点 **Network → Maximum Upload Size** 配置三者中的较小值。超过 Cloudflare 边界会在请求到达应用前返回 `413`；调低 Network 配置也会触发 `413`。2.56 GiB 归档不适合网页上传路径，请使用上面的 CLI。
 
 ### 安全边界
 
@@ -292,7 +306,7 @@ ADMIN_PAGE_SIZE=20
 - 管理会话失效后，HTML `GET` 请求返回 `303` 并跳转到 `/manage-images/login`；`POST` 等写请求仍返回 `401`，不会通过重定向重放写操作。
 - 所有写操作要求 CSRF token；页面输出进行 HTML 转义。
 - 图片和归档使用 `python-multipart` 流式解析，文件部分通过磁盘 spool 处理，并设置请求、单图、归档成员和归档总量限制；请求结束时会确定性关闭上传临时文件。
-- 会话和待确认归档 preview 保存在单进程内存中；重启会退出登录并使 preview 失效。
+- 待确认归档文件保存在服务端 `UPLOAD_TMP_DIR`，preview 索引和管理会话保存在单进程内存；TTL 到期、登出或进程重启会清理或使其失效。上传途中，浏览器或 Cloudflare 还可能使用本机或边缘临时存储，这些都不是永久图库。
 - 生产环境应在 HTTPS 反向代理后使用，不要公开 Token、Cookie 或 WebDAV 凭据。
 
 ### 常用操作
@@ -305,7 +319,7 @@ ADMIN_PAGE_SIZE=20
 6. **WebDAV 预览**：已有本地缓存的远端对象可以预览；未缓存对象显示占位卡片，打开管理页不会批量下载远端原图。
 7. **筛选**：可按来源、真实方向、存放目录、启用状态、缓存状态、标签和文件名/HREF 筛选，并选择每页数量。标签筛选提供“全部标签”“无标签”和用户创建标签；“无标签”表示不存在任何标签关系，因此关联了停用标签的图片不算无标签，并可与其他筛选、排序和分页组合。
 8. **缓存**：可运行维护或清空 WebDAV 缓存；缓存可重建，不是永久图库。
-9. **归档**：先上传到 preview，系统执行完整安全校验和 dry-run；核对摘要、默认标签及第一层目录映射后再 confirm。preview 绑定当前会话、有 TTL，登出、过期或服务重启后不能确认。
+9. **归档**：只接受 ZIP、TAR.GZ、TGZ。先上传到 preview，系统执行完整安全校验和 dry-run；核对摘要、上传前选择的多标签及归档成员父目录映射后再 confirm。上传前标签应用于本次所有图片，空表示不加标签；preview 绑定当前会话、有 TTL，登出、过期或服务重启后不能确认。
 
 ## 8. 环境变量
 
@@ -355,7 +369,7 @@ python -m compileall -q app tests
 bash -n scripts/*.sh docker-entrypoint.sh
 ```
 
-V2.2.2 最终候选镜像的完整测试为 `88 passed`。本轮还执行了 Python `compileall`、Shell 语法和 `git diff --check`，并完成远程隔离运行态验收：`/health` 正常，Uvicorn PID 1 的 UID 为 `1000`，未登录访问管理 HTML 页面返回 `303` 并定位到 `/manage-images/login`。原有 10 个容器前后快照一致，测试容器、候选镜像和临时目录均已清理。生产镜像按精简设计只安装运行依赖，不内置 `pytest`；测试进程使用 `env -u CACHE_DIR`，仅用于验证缓存目录的未配置默认行为。本轮未执行浏览器视觉验收。
+V2.2.3 最终候选镜像的完整 Python 测试为 `93 passed`，Node 上传校验行为测试通过。本轮还执行了 Python `compileall`、Node `--check`、Shell 语法和 `git diff --check`，并完成远程隔离运行态验收：容器为 `healthy`、版本为 `2.2.3`、Uvicorn PID 1 的 UID 为 `1000`，未登录访问管理 HTML 页面返回 `303` 并定位到 `/manage-images/login`；空标签引导、创建标签后的普通图片/归档多标签控件及内联上传进度逻辑均通过 HTTP/HTML 合同检查。原有 10 个容器的 ID、镜像和名称等稳定字段一致，测试容器、候选镜像和临时目录均已清理。生产镜像按精简设计只安装运行依赖，不内置 `pytest`；测试进程清除了生产镜像固定的路径类环境变量，仅用于验证未配置时的默认路径推导。本轮未执行真实 2.56 GiB 上传或浏览器视觉验收。
 
 Docker Hub `v2` 已发布为 V2.2.2；独立回读确认 Manifest/Registry 摘要为 `sha256:7ca9a5958242417a0b1f9b5b5609a437f8158db55ab5323e989adcd098d0ae2f`，Config 摘要为 `sha256:0c1a92c610d5af76bb115f8ceab8d4b70f10be778ee5cef6b0843b7b83267ef3`，平台为 `linux/amd64`，共 12 层。
 

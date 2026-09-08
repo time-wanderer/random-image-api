@@ -867,3 +867,108 @@ def test_untagged_filter_empty_state_and_reserved_value_contract(admin_env) -> N
         assert "当前筛选条件下没有无标签图片" in page.text
         assert "前往上传" in page.text and "管理标签" in page.text
         assert "没有匹配的图片" not in page.text
+
+
+def test_upload_forms_expose_client_validation_progress_and_fallback(admin_env) -> None:
+    settings, app = admin_env
+    with new_client(app) as client:
+        login(client)
+        page = client.get(ADMIN).text
+
+    assert f'data-upload-kind="image" data-max-bytes="{settings.admin_max_upload_bytes}"' in page
+    assert f'data-upload-kind="archive" data-max-bytes="{settings.admin_max_archive_bytes}"' in page
+    assert 'accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"' in page
+    assert 'accept=".zip,.tar.gz,.tgz"' in page
+    assert 'method="post"' in page and 'enctype="multipart/form-data"' in page
+    assert all(marker in page for marker in (
+        "XMLHttpRequest", "new FormData(form)", "xhr.upload.onprogress",
+        "data-upload-error", "data-upload-status", "xhr.timeout",
+        "[413,502,503,504,520,522,524]",
+    ))
+
+
+def test_archive_preview_preserves_selected_tags_and_confirm_revalidates(admin_env) -> None:
+    settings, app = admin_env
+    payload = archive_bytes({"safe.png": image_bytes()})
+    with new_client(app) as client:
+        csrf = login(client)
+        for slug in ("primary", "extra"):
+            assert client.post(
+                f"{ADMIN}/tags",
+                data={"csrf": csrf, "slug": slug, "display_name": slug.title()},
+                follow_redirects=False,
+            ).status_code == 303
+        response = client.post(
+            f"{ADMIN}/archives/preview",
+            data={"csrf": csrf, "default_tag": "primary", "tags": "extra"},
+            files={"archive": ("selected.zip", payload, "application/zip")},
+        )
+        assert response.status_code == 200
+        assert re.search(r'<option value="primary" selected>', response.text)
+        assert re.search(r'name="tags" value="extra" checked', response.text)
+        token_match = re.search(r'name="token" value="([^"]+)"', response.text)
+        assert token_match
+        token = token_match.group(1)
+
+        with db.get_conn(settings.database_path) as conn:
+            conn.execute("UPDATE tags SET enabled=0 WHERE slug='extra'")
+        rejected = client.post(
+            f"{ADMIN}/archives/confirm",
+            data={"csrf": csrf, "token": token, "default_tag": "primary", "tags": "extra", "tags_present": "1"},
+        )
+        assert rejected.status_code == 400
+        assert not list(settings.upload_tmp_dir.glob("*"))
+        assert not list(settings.images_dir.rglob("*.*"))
+
+
+def test_archive_confirm_uses_tags_saved_in_preview_state(admin_env) -> None:
+    settings, app = admin_env
+    with new_client(app) as client:
+        csrf = login(client)
+        for slug in ("primary", "extra"):
+            assert client.post(
+                f"{ADMIN}/tags",
+                data={"csrf": csrf, "slug": slug, "display_name": slug.title()},
+                follow_redirects=False,
+            ).status_code == 303
+        response = client.post(
+            f"{ADMIN}/archives/preview",
+            data={"csrf": csrf, "default_tag": "primary", "tags": "extra"},
+            files={"archive": ("saved-tags.zip", archive_bytes({"safe.png": image_bytes()}), "application/zip")},
+        )
+        token_match = re.search(r'name="token" value="([^"]+)"', response.text)
+        assert response.status_code == 200 and token_match
+        confirmed = client.post(
+            f"{ADMIN}/archives/confirm",
+            data={"csrf": csrf, "token": token_match.group(1)},
+            follow_redirects=False,
+        )
+        assert confirmed.status_code == 303
+        with db.get_conn(settings.database_path) as conn:
+            slugs = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT t.slug FROM image_tags it JOIN tags t ON t.id=it.tag_id"
+                )
+            }
+        assert {"primary", "extra"} <= slugs
+        assert not list(settings.upload_tmp_dir.glob("*"))
+
+
+@pytest.mark.parametrize("slug", ["unknown", "disabled"])
+def test_archive_preview_rejects_unknown_or_disabled_tag_without_temp(admin_env, slug: str) -> None:
+    settings, app = admin_env
+    with new_client(app) as client:
+        csrf = login(client)
+        if slug == "disabled":
+            with db.get_conn(settings.database_path) as conn:
+                tag_id = db.ensure_tag(conn, slug, "Disabled")
+                conn.execute("UPDATE tags SET enabled=0 WHERE id=?", (tag_id,))
+        response = client.post(
+            f"{ADMIN}/archives/preview",
+            data={"csrf": csrf, "tags": slug},
+            files={"archive": ("tagged.zip", archive_bytes({"safe.png": image_bytes()}), "application/zip")},
+        )
+        assert response.status_code == 400
+        assert not list(settings.upload_tmp_dir.glob("*"))
+        assert not list(settings.images_dir.rglob("*.*"))

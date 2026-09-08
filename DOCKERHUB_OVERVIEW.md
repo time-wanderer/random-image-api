@@ -4,9 +4,10 @@ Random Image API V2 是 V1 的向后兼容扩展，增加 tags、多对多主题
 
 ## 发布状态（请先阅读）
 
-- **当前源码与发布镜像版本**：V2.2.2
+- **当前候选源码版本**：V2.2.3，已完成远程隔离构建、93 项 Python 测试与运行态验收，等待本轮发布
+- **当前发布镜像版本**：V2.2.2（本轮发布前）
 - **当前发布镜像**：`qinlingmonkey/random-image-api:v2`
-- **V2.2.2 验收状态**：最终候选镜像完整测试为 `88 passed`；健康检查、未登录管理 HTML `GET` 的 `303` 登录回退、PID 1 UID `1000` 和原有 10 个容器前后快照均通过
+- **V2.2.3 候选验收状态**：完整测试为 `93 passed`，Node 上传校验测试通过；容器 `healthy`、版本 `2.2.3`、未登录管理 HTML `GET` 的 `303` 登录回退、PID 1 UID `1000`、上传进度与多标签页面合同和原有 10 个容器稳定字段比对均通过
 - **平台**：`linux/amd64`
 - **V2.2.2 Manifest / Registry 摘要**：`sha256:7ca9a5958242417a0b1f9b5b5609a437f8158db55ab5323e989adcd098d0ae2f`
 - **V2.2.2 Config 摘要**：`sha256:0c1a92c610d5af76bb115f8ceab8d4b70f10be778ee5cef6b0843b7b83267ef3`
@@ -185,7 +186,8 @@ http://<主机>:10086/manage-images
 - 给单张或多张本地图片添加/移除标签；
 - 给 WebDAV 对象添加/移除标签；
 - 图片标签筛选提供“全部标签”“无标签”和用户创建标签；“无标签”表示不存在任何标签关系，关联停用标签的图片不算无标签，并可与来源、方向、目录、状态、搜索、排序和分页组合；
-- 多文件上传、格式/像素/大小验证、哈希去重；
+- 多文件上传、JPG/JPEG/PNG/WebP 类型与每文件大小预检、哈希去重；
+- ZIP/TAR.GZ/TGZ 归档上传前校验、真实上传进度、代理/网络错误恢复和无 JS 普通表单 fallback；
 - 把本地图片移动到 `desktop`、`mobile` 或 `square`，且不改变真实方向；
 - 点击按钮后二次确认删除本地原图，不再手写 `DELETE`；
 - WebDAV 对象启停、缓存维护和清空；未缓存对象只显示占位，不自动下载。
@@ -194,19 +196,26 @@ http://<主机>:10086/manage-images
 
 ## 5. 归档 preview-confirm 与 importer
 
-V1 命令行 importer 仍保留，支持 ZIP、TAR.GZ、TGZ：
+命令行 importer 支持 ZIP、TAR.GZ、TGZ、多次 `--tag` 和 `--database-path`，只处理归档，不直接接受目录：
 
 ```bash
-python -m app.importer /path/to/images.zip --images-dir ./data/images --dry-run
-python -m app.importer /path/to/images.zip --images-dir ./data/images
+python -m app.importer /path/to/images.zip --output-dir ./data/images --dry-run
+python -m app.importer /path/to/images.tar.gz \
+  --output-dir ./data/images \
+  --database-path ./data/database/images.db \
+  --tag nature --tag featured
 ```
+
+文件夹应先用 `tar -czf /tmp/photos.tar.gz -C /path/to photos` 打包后运行 CLI；也可复制图片到 `data/images/{desktop,mobile,square}/` 后调用 `POST /admin/rescan`。
 
 V2 管理 UI 推荐使用两阶段流程：
 
-1. **preview**：上传归档，先完整校验路径穿越、成员数、单文件/总大小、压缩比和真实图片格式，执行 dry-run，不写入永久图库；
-2. **confirm**：核对统计、默认标签和第一层目录标签映射后，才正式导入。
+1. **preview**：上传归档，先完整校验路径穿越、成员数、单文件/总大小、压缩比和真实图片格式，执行 dry-run，不写入永久图库；上传前可选择多个已有启用标签，空表示不加标签；
+2. **confirm**：核对统计、上传前标签及归档成员父目录产生的目录标签映射后，才正式导入；预览页仍可复核修改。上传前选择的标签应用于本次所有图片。
 
-preview 绑定当前登录会话并有 TTL；登出、过期或容器重启后必须重新 preview。
+待确认归档保存在服务端 `UPLOAD_TMP_DIR`，preview 索引只在进程内存；TTL、登出或进程重启会清理或使其失效。浏览器或 Cloudflare 上传链路可能另用本机或边缘临时存储，这些均不是永久图库。
+
+默认网页归档上限仍为 512 MiB，没有提高。若经过 Cloudflare，网页实际上限取应用限制、计划限制和站点 **Network → Maximum Upload Size** 设置中的较小值。Cloudflare 官方当前列出的计划边界为 Free/Pro 100 MB、Business 200 MB、Enterprise 默认 500 MB（Enterprise 可在 Network 页面自助调整至 5 GB）；超过或把站点设置调低到请求大小以下均会返回 `413`。2.56 GiB 不适合网页路径，应使用 CLI。
 
 ## 6. WebDAV Hybrid 与第一层主题
 
@@ -290,6 +299,7 @@ docker compose up -d
 - `/random` 为 `404`：确认图库有可用图片；主题请求还需确认标签存在、启用并已关联候选。
 - `/random` 为 `503`：检查数据库、WebDAV 连通性、允许主机、凭据、缓存和本地降级候选。
 - 管理 UI 无法登录：确认 `ADMIN_TOKEN`、会话密钥、入口路径和反向代理设置。
+- 归档上传返回 `413`：比较 `ADMIN_MAX_ARCHIVE_BYTES`、Cloudflare 计划上限及 Network → Maximum Upload Size，网页有效值取其中最小者；大归档改用 CLI。
 - `.env` 修改未生效：执行 `docker compose up -d --force-recreate`。
 - Permission denied：确保挂载目录可由镜像内非 Root 用户写入。
 - WebDAV 主题未出现：主题必须是方向根目录下第一层、且名称可转换为合法 slug；然后重新同步。

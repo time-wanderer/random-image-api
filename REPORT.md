@@ -2,7 +2,37 @@
 
 ## 1. 报告范围
 
-本报告记录 Random Image API V2.2 文档、当前实现与发布状态。当前源码版本为 V2.2.2；V2.2 保留 V1/V2 API、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、tags 和主题接口，重点优化管理 UI、图片预览、物理目录整理与标签编辑。
+本报告记录 Random Image API V2.2 文档、当前实现与发布状态。当前候选源码版本为 V2.2.3，已完成远程隔离构建、完整测试和运行态验收，等待本轮 commit、GitHub push 与 Docker Hub 发布；Docker Hub `v2` 在本轮发布前仍为 V2.2.2。V2.2 保留 V1/V2 API、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、tags 和主题接口，重点优化管理 UI、图片预览、物理目录整理与标签编辑。
+
+### V2.2.3 聚焦修复（当前工作树）
+
+#### 网络调研与限制结论
+
+本轮实际检索并核对 Cloudflare 官方 Error 413 与 Workers Limits 文档。官方当前列出的最大请求体为 Free/Pro 100 MB、Business 200 MB、Enterprise 默认 500 MB；Enterprise 可在站点 **Network → Maximum Upload Size** 自助调整至 5 GB，更大值需联系 Cloudflare。站点配置低于请求大小时同样返回 `413`。因此网页有效上限取应用 `ADMIN_MAX_ARCHIVE_BYTES`、Cloudflare 计划边界和 Network 配置中的较小值；应用默认 512 MiB 未提高。2.56 GiB 不适合网页路径，应使用 CLI。
+
+#### 实现方案
+
+- 普通图片选择与拖拽仅接受扩展名和 MIME 对应的 JPG/JPEG、PNG、WebP，并按每文件 `ADMIN_MAX_UPLOAD_BYTES` 上传前拒绝；非法拖拽不会写入 input，也不会提交，错误区使用中文 `role=alert`。
+- 归档选择与拖拽仅接受 ZIP、TAR.GZ、TGZ，按服务端注入的 `ADMIN_MAX_ARCHIVE_BYTES` 预检并展示文件名、大小和网页上限；超限提示改用 CLI。
+- 归档表单保留 method/action/enctype 的无 JS fallback；有 JS 时使用 `XMLHttpRequest` + `FormData`，展示真实 upload progress、已传 MiB和上传完成后的服务端安全校验状态。认证失效转登录；413、常见 Cloudflare/网关错误、网络中断、超时和中断均显示中文错误并恢复按钮。
+- 上传前可选择多个已有启用标签，空表示不加标签；preview 将字段语义和选择保存到 `_Preview`，确认页默认保留并允许修改。preview 与 confirm 两阶段均从 SQLite 验证标签存在且启用，拒绝未知/禁用标签并清理临时归档。
+- 待确认归档保存于服务端 `UPLOAD_TMP_DIR`，索引只存在进程内存；TTL、登出或重启会清理或使其失效。浏览器或 Cloudflare 可能另用本机或边缘临时存储。
+- CLI 文档明确其已支持 ZIP/TAR.GZ/TGZ、多 `--tag` 和 `--database-path`，但不直接接受目录；文件夹应先打包，或复制到 `images/{desktop,mobile,square}` 后 rescan。目录标签映射来自归档成员父目录，预览页可复核；上传前标签应用于本次所有图片。
+
+#### 创建和修改的文件
+
+- 修改：`app/__init__.py`、`app/admin.py`、`tests/test_api.py`、`tests/test_admin.py`、`README.md`、`DOCKERHUB_OVERVIEW.md`、`REPORT.md`。
+- 新增：`app/admin_upload.js`、`tests/test_admin_upload.js`。
+- 未修改 `.env`、业务图片、SQLite、日志、缓存或备份包；远程操作仅使用隔离目录、候选镜像和临时容器，验收后已清理，尚待本轮 commit 与 push。
+
+#### 测试、结果与风险
+
+- Node 纯函数测试已实际执行：`node tests/test_admin_upload.js`，通过；覆盖图片扩展/MIME 对应、逐文件超限、归档扩展与归档超限。
+- Python `compileall`、Node `--check`、Shell 语法和 `git diff --check` 均通过。
+- 测试 VPS 上成功构建 V2.2.3 生产候选镜像；使用不写回候选镜像的一次性测试容器安装开发依赖后，完整 Python 测试为 `93 passed`。
+- 运行态验收确认容器 `healthy`、版本 `2.2.3`、OOM 为 false、重启次数为 0，Uvicorn PID 1 的 UID 为 `1000`；未登录管理页面 `303` 回退登录页，空标签引导、创建测试标签后的普通图片/归档多标签控件及内联上传进度逻辑通过真实 HTTP/HTML 合同检查。
+- 原有 10 个容器的 ID、镜像和名称等稳定字段验收前后一致；本轮测试容器、候选镜像和远程隔离目录均已清理，长期 VPS SSH 密钥按约定保留。
+- 已知风险：前端校验只改善体验，不能成为信任边界；服务端 CSRF、实际图片解码、请求/图片/归档限额和两阶段标签验证继续承担安全约束。Cloudflare 在应用前拒绝的请求无法由应用返回自定义页面，只能由 XHR 根据状态码给出提示。本轮未实际通过 Cloudflare 上传 2.56 GiB 文件，也未执行浏览器视觉验收。
 
 V2.2.2 修复命令行归档导入无法打标签、网页压缩包上传内存与临时文件生命周期、多标签归档关联，以及管理会话失效后 HTML 页面不返回登录页的问题。最终候选镜像完整测试为 `88 passed`，远程健康检查、未登录 HTML `GET` 的 `303` 登录回退和 Uvicorn PID 1 UID `1000` 均通过；发布前后原有 10 个容器快照一致，隔离容器、候选镜像、临时认证和目录均已清理。Docker Hub `qinlingmonkey/random-image-api:v2` 已发布为 V2.2.2、平台 `linux/amd64`；独立回读确认 Manifest/Registry 摘要为 `sha256:7ca9a5958242417a0b1f9b5b5609a437f8158db55ab5323e989adcd098d0ae2f`，Config 摘要为 `sha256:0c1a92c610d5af76bb115f8ceab8d4b70f10be778ee5cef6b0843b7b83267ef3`，共 12 层，Entrypoint 为 `/usr/local/bin/docker-entrypoint.sh`。源码功能提交 `d8752a0321404d8ad7ec2cfa3e2c8d06bf9bbd2b` 已同步 GitHub `main`；长期复用 SSH 密钥按约定保留。
 

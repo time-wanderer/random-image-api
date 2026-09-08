@@ -37,7 +37,7 @@ def test_health(client: TestClient) -> None:
     response = client.get("/health")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["version"] == "2.2.2"
+    assert payload["version"] == "2.2.3"
     assert payload["status"] == "ok"
     assert payload["database"] == "ok"
     assert payload["images"]["total"] == 5

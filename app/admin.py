@@ -40,6 +40,7 @@ _FORMAT_EXTENSIONS = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
 _CONTENT_TYPES = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}
 _SLUG_PART = re.compile(r"[^a-z0-9]+")
 _UNTAGGED_FILTER = "__untagged__"
+_UPLOAD_JS = Path(__file__).with_name("admin_upload.js").read_text(encoding="utf-8")
 
 
 class _ClosingFormRoute(APIRoute):
@@ -72,6 +73,8 @@ class _Preview:
     archive_sha256: str
     summary: dict[str, object]
     entries: list[tuple[str, str]]  # (sha256, directory-derived slug)
+    selected_default_tag: str
+    selected_tags: tuple[str, ...]
 
 
 def _escape(value: object) -> str:
@@ -232,12 +235,12 @@ input[type=checkbox] { width: auto; }
 }
 </style><script>(function(){document.addEventListener('DOMContentLoaded',function(){
 function closeLayer(layer){if(!layer)return;layer.hidden=true;document.body.style.overflow='';if(layer._opener)layer._opener.focus();}
-document.addEventListener('submit',function(e){var f=e.target;if(!f.matches('form'))return;var sel=f.querySelector('select[name="tag_id"]');if(sel&&sel.required&&!sel.value){e.preventDefault();var h=f.querySelector('.form-error')||document.createElement('p');h.className='alert error form-error';h.setAttribute('role','alert');h.textContent='请先选择一个标签，再提交此操作。';if(!h.parentNode)f.prepend(h);sel.focus();return;}var btn=f.querySelector('button[type="submit"],button:not([type])');if(btn){btn.disabled=true;btn.dataset.originalText=btn.textContent;btn.textContent='处理中…';}});
+document.addEventListener('submit',function(e){var f=e.target;if(!f.matches('form')||f.matches('[data-upload-form]'))return;var sel=f.querySelector('select[name="tag_id"]');if(sel&&sel.required&&!sel.value){e.preventDefault();var h=f.querySelector('.form-error')||document.createElement('p');h.className='alert error form-error';h.setAttribute('role','alert');h.textContent='请先选择一个标签，再提交此操作。';if(!h.parentNode)f.prepend(h);sel.focus();return;}var btn=f.querySelector('button[type="submit"],button:not([type])');if(btn){btn.disabled=true;btn.dataset.originalText=btn.textContent;btn.textContent='处理中…';}});
 function refreshBatchSelection(){var count=document.querySelectorAll('[data-batch-image]:checked').length;var h=document.getElementById('batch-count');var bar=document.querySelector('[data-batch-toolbar]');if(h)h.textContent=count?'已选择 '+count+' 张图片':'请选择图片';if(bar)bar.hidden=!count;return count;}document.addEventListener('change',function(e){if(e.target.matches('[data-batch-image]'))refreshBatchSelection();if(e.target.matches('[data-drop-input]')){var z=e.target.closest('[data-drop-zone]'),h=z&&z.querySelector('[data-file-summary]');if(h)h.textContent=e.target.files.length+' 个文件：'+Array.from(e.target.files).map(function(x){return x.name;}).join('、');}});
 document.addEventListener('click',function(e){var layer=e.target.closest('.lightbox,.drawer');if(layer&&e.target===layer){closeLayer(layer);return;}var batch=e.target.closest('[data-batch-select]');if(batch){e.preventDefault();var checked=batch.dataset.batchSelect==='all';document.querySelectorAll('[data-batch-image]').forEach(function(x){x.checked=checked;});refreshBatchSelection();return;}var c=e.target.closest('[data-close-layer]');if(c){e.preventDefault();closeLayer(document.getElementById(c.dataset.closeLayer));return;}var l=e.target.closest('[data-lightbox-src]');if(l){e.preventDefault();var b=document.getElementById('image-lightbox');b.querySelector('img').src=l.dataset.lightboxSrc;b.querySelector('img').alt=l.dataset.lightboxAlt||'';b._opener=l;b.hidden=false;document.body.style.overflow='hidden';return;}var d=e.target.closest('[data-detail-url]');if(d){e.preventDefault();var x=document.getElementById('image-detail-drawer');x.querySelector('.drawer-content').innerHTML='<p class="muted">正在加载…</p>';x._opener=d;x.hidden=false;document.body.style.overflow='hidden';fetch(d.dataset.detailUrl,{credentials:'same-origin'}).then(function(r){if(r.redirected&&new URL(r.url,window.location.href).pathname.endsWith('/login')){window.location.assign(r.url);return null;}if(!r.ok)throw Error();return r.text();}).then(function(t){if(t!==null)x.querySelector('.drawer-content').innerHTML=t;}).catch(function(){x.querySelector('.drawer-content').innerHTML='<p class="alert error" role="alert">详情加载失败，请重试。</p>';});}});
 document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeLayer(document.getElementById('image-lightbox'));closeLayer(document.getElementById('image-detail-drawer'));}});
 var initialBatch=document.querySelector('[data-batch-toolbar]');if(initialBatch)initialBatch.hidden=true;var z=document.querySelector('[data-drop-zone]'),i=document.querySelector('[data-drop-input]');if(z&&i){['dragenter','dragover'].forEach(function(n){z.addEventListener(n,function(e){e.preventDefault();z.classList.add('is-dragging');});});['dragleave','drop'].forEach(function(n){z.addEventListener(n,function(e){e.preventDefault();z.classList.remove('is-dragging');});});z.addEventListener('drop',function(e){if(e.dataTransfer.files.length){i.files=e.dataTransfer.files;i.dispatchEvent(new Event('change',{bubbles:true}));}});}
-});})();</script>"""
+});})();</script>""" + f"<script>{_UPLOAD_JS}</script>"
     return HTMLResponse("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"+f"{token}<title>{_escape(title)}</title>{style}</head><body><header><div class=\"appbar\"><div class=\"brand\"><span class=\"brand-mark\" aria-hidden=\"true\">R</span><div><h1>{_escape(title)}</h1><span class=\"version\">Random Image API · 管理端 · V2</span></div></div><div class=\"user-actions\">{nav}</div></div></header><main>{body}</main></body></html>")
 
 
@@ -339,9 +342,9 @@ def _selected_tag_slugs(form: Any) -> list[str]:
 def _require_existing_tags(conn: Any, slugs: list[str]) -> dict[str, int]:
     result: dict[str, int] = {}
     for slug in slugs:
-        row = conn.execute("SELECT id FROM tags WHERE slug=? COLLATE NOCASE", (slug,)).fetchone()
+        row = conn.execute("SELECT id FROM tags WHERE slug=? COLLATE NOCASE AND enabled=1", (slug,)).fetchone()
         if row is None:
-            raise ValueError(f"tag does not exist: {slug}")
+            raise ValueError(f"tag does not exist or is disabled: {slug}")
         result[slug] = int(row["id"])
     return result
 
@@ -504,7 +507,7 @@ def create_admin_router(settings: Any) -> APIRouter:
                     limited_stream(),
                     max_files=1000,
                     max_fields=1000,
-                    max_part_size=upload_max,
+                    max_part_size=request_max,
                 ).parse()
             elif media_type == "application/x-www-form-urlencoded":
                 parsed = await FormParser(
@@ -653,8 +656,8 @@ def create_admin_router(settings: Any) -> APIRouter:
             '<div class="section-heading"><div><p class="eyebrow">管理操作</p><h2>导入与维护</h2></div></div>'
             '<section class="management-grid">'
             f'<section class="panel" id="upload"><h3>上传图片</h3><p class="muted">支持 JPG、JPEG、PNG、WebP；可多选。标签为空时，图片仍可先上传，之后在图片库补充。</p>'
-            f'<form method="post" action="{_escape(admin_path)}/upload" enctype="multipart/form-data">{hidden(session.csrf)}{tag_inputs(tag_rows)}<label class="file-picker" data-drop-zone="1">选择图片<span class="help-text" data-file-summary>拖拽文件到此处，或点击选择；无 JS 时仍可普通上传</span><input data-drop-input="1" type="file" name="files" accept="image/jpeg,image/png,image/webp" multiple required></label><button type="submit">上传图片</button></form></section>'
-            f'<section class="panel"><h3>归档导入</h3><p class="muted">先预览内容和目录标签，确认后才会写入；不会自动下载 WebDAV 图片。</p><form method="post" action="{_escape(admin_path)}/archives/preview" enctype="multipart/form-data">{hidden(session.csrf)}<label class="file-picker">选择 ZIP / TAR 归档<span class="help-text">支持 ZIP、TAR.GZ、TGZ；先预览，确认后导入</span><input type="file" name="archive" accept=".zip,.tar.gz,.tgz" required></label><button>预览归档</button></form></section>'
+            f'<form data-upload-form="1" data-upload-kind="image" data-max-bytes="{upload_max}" method="post" action="{_escape(admin_path)}/upload" enctype="multipart/form-data">{hidden(session.csrf)}{tag_inputs(tag_rows)}<label class="file-picker" data-drop-zone="1">选择图片<span class="help-text" data-file-summary>拖拽文件到此处，或点击选择；每个文件网页上限 {upload_max / 1024 / 1024:.2f} MiB；无 JS 时仍可普通上传</span><input type="file" data-upload-input="1" name="files" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" multiple required></label><p class="alert error" role="alert" data-upload-error hidden></p><button type="submit">上传图片</button></form></section>'
+            f'<section class="panel"><h3>归档导入</h3><p class="muted">先预览内容和目录标签，确认后才会写入；上传前选择的标签应用于本次所有图片，空表示不加标签。</p><p class="help-text">preview 归档保存在服务端 UPLOAD_TMP_DIR，索引仅在进程内存；TTL、登出或重启会清理或失效。浏览器或 Cloudflare 可能使用本机或边缘临时存储。2.56 GiB 不适合网页路径，请使用 CLI。</p><form data-upload-form="1" data-upload-kind="archive" data-max-bytes="{int(getattr(settings, "admin_max_archive_bytes", importer.ImportLimits().max_archive_bytes))}" data-login-url="{_escape(admin_path)}/login" method="post" action="{_escape(admin_path)}/archives/preview" enctype="multipart/form-data">{hidden(session.csrf)}{tag_inputs(tag_rows)}<label class="file-picker" data-drop-zone="1">选择 ZIP / TAR 归档<span class="help-text" data-file-summary>支持 ZIP、TAR.GZ、TGZ；网页上限 {int(getattr(settings, "admin_max_archive_bytes", importer.ImportLimits().max_archive_bytes)) / 1024 / 1024:.2f} MiB</span><input type="file" data-upload-input="1" name="archive" accept=".zip,.tar.gz,.tgz" required></label><p class="alert error" role="alert" data-upload-error hidden></p><p class="message" role="status" aria-live="polite" data-upload-status hidden></p><button type="submit">预览归档</button></form></section>'
             f'<section class="panel"><h3>WebDAV 与缓存</h3><p class="muted">WebDAV 只管理已索引对象；预览仅使用已有缓存。</p><div class="actions"><a class="button secondary" href="{_escape(admin_path)}/images?source=webdav">管理 WebDAV 图片</a>'
             f'<form method="post" action="{_escape(admin_path)}/cache/clear" onsubmit="return confirm(\'确定清理全部 WebDAV 缓存？\')">{hidden(session.csrf)}<button class="warning">清理 WebDAV 缓存</button></form></div></section>'
             '</section>'
@@ -1201,6 +1204,16 @@ def create_admin_router(settings: Any) -> APIRouter:
         suffix = ".tar.gz" if filename.endswith(".tar.gz") else ".tgz" if filename.endswith(".tgz") else ".zip" if filename.endswith(".zip") else ""
         if not suffix:
             raise HTTPException(400, "supported archive types: ZIP, TAR.GZ, TGZ")
+        try:
+            selected_slugs = _selected_tag_slugs(form)
+            selected_default_tag = str(form.get("default_tag", "")).strip()
+            selected_extra_tags = tuple(
+                slug for slug in selected_slugs if slug != selected_default_tag
+            )
+            with db.get_conn(settings.database_path) as conn:
+                _require_existing_tags(conn, selected_slugs)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         limits = _limits(settings)
         upload_tmp_dir.mkdir(parents=True, exist_ok=True)
         token = secrets.token_urlsafe(32)
@@ -1232,6 +1245,8 @@ def create_admin_router(settings: Any) -> APIRouter:
                 archive_hash.hexdigest(),
                 summary.to_dict(),
                 entries,
+                selected_default_tag,
+                selected_extra_tags,
             )
         except HTTPException:
             path.unlink(missing_ok=True)
@@ -1244,25 +1259,30 @@ def create_admin_router(settings: Any) -> APIRouter:
             f'<label><input type="checkbox" name="map_dirs" value="{_escape(hint)}" checked> 映射目录 {_escape(hint)}</label><br>'
             for hint in hints
         )
-        default_value = _slugify(str(getattr(settings, "admin_import_default_tag", "imported")))
+        default_value = selected_default_tag
         with db.get_conn(settings.database_path) as conn:
             tag_rows = conn.execute(
                 "SELECT slug,display_name FROM tags WHERE enabled=1 ORDER BY slug"
             ).fetchall()
+        default_options = '<option value="">不添加标签（可选）</option>' + "".join(
+            f'<option value="{_escape(row["slug"])}"{" selected" if str(row["slug"]).lower() == default_value.lower() else ""}>{_escape(row["display_name"])} — {_escape(row["slug"])}</option>'
+            for row in tag_rows
+        )
         tag_choices = "".join(
-            f'<label><input type="checkbox" name="tags" value="{_escape(row["slug"])}"> '
+            f'<label><input type="checkbox" name="tags" value="{_escape(row["slug"])}"'
+            f'{" checked" if str(row["slug"]) in selected_extra_tags else ""}> '
             f'{_escape(row["display_name"])} — {_escape(row["slug"])}</label><br>'
             for row in tag_rows
             if str(row["slug"]).lower() != default_value.lower()
         )
         if not tag_choices:
-            tag_choices = f'<p class="muted">没有可追加的标签，可先到 <a href="{admin_path}/tags">标签工作台</a> 创建。</p>'
+            tag_choices = f'<p class="muted">没有其他可选标签，可先到 <a href="{admin_path}/tags">标签工作台</a> 创建。</p>'
         body = (
             f"<pre>{_escape(summary.to_dict())}</pre>"
             f'<form method="post" action="{admin_path}/archives/confirm">{hidden(_session.csrf)}'
             f'<input type="hidden" name="token" value="{_escape(token)}">'
             f'<input type="hidden" name="map_dirs_present" value="1">'
-            f'<label>默认标签 <input name="default_tag" value="{_escape(default_value)}"></label><br>'
+            f'<label>本次所有图片的主标签（可选） <select name="default_tag">{default_options}</select></label><input type="hidden" name="tags_present" value="1"><br>'
             f'<fieldset><legend>追加标签（可多选）</legend>{tag_choices}</fieldset>'
             f'{choices}<button>确认导入</button></form>'
         )
@@ -1296,10 +1316,11 @@ def create_admin_router(settings: Any) -> APIRouter:
             pending.archive_path.unlink(missing_ok=True)
             raise HTTPException(400, "preview archive changed")
         try:
-            if "default_tag" not in form:
+            if "default_tag" not in form and "tags_present" not in form:
                 form = FormData([
                     *form.multi_items(),
-                    ("default_tag", str(getattr(settings, "admin_import_default_tag", "imported"))),
+                    ("default_tag", pending.selected_default_tag),
+                    *(("tags", slug) for slug in pending.selected_tags),
                 ])
             selected_slugs = _selected_tag_slugs(form)
             available_hints = {hint for _digest, hint in pending.entries if hint}
