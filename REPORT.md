@@ -2,9 +2,9 @@
 
 ## 1. 报告范围
 
-本报告记录 Random Image API V2.2 文档、当前实现与发布状态。当前候选源码版本为 V2.2.3，已完成远程隔离构建、完整测试和运行态验收，等待本轮 commit、GitHub push 与 Docker Hub 发布；Docker Hub `v2` 在本轮发布前仍为 V2.2.2。V2.2 保留 V1/V2 API、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、tags 和主题接口，重点优化管理 UI、图片预览、物理目录整理与标签编辑。
+本报告记录 Random Image API V2.2 文档、当前实现与发布状态。源码与 Docker Hub `qinlingmonkey/random-image-api:v2` 均已发布为 V2.2.3；远程隔离构建、完整测试、运行态验收和发布后 Registry 回读均已完成。V2.2 保留 V1/V2 API、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、tags 和主题接口，重点优化管理 UI、图片预览、物理目录整理与标签编辑。
 
-### V2.2.3 聚焦修复（当前工作树）
+### V2.2.3 聚焦修复（已发布）
 
 #### 网络调研与限制结论
 
@@ -23,7 +23,7 @@
 
 - 修改：`app/__init__.py`、`app/admin.py`、`tests/test_api.py`、`tests/test_admin.py`、`README.md`、`DOCKERHUB_OVERVIEW.md`、`REPORT.md`。
 - 新增：`app/admin_upload.js`、`tests/test_admin_upload.js`。
-- 未修改 `.env`、业务图片、SQLite、日志、缓存或备份包；远程操作仅使用隔离目录、候选镜像和临时容器，验收后已清理，尚待本轮 commit 与 push。
+- 未修改 `.env`、业务图片、SQLite、日志、缓存或备份包；远程操作仅使用隔离目录、候选镜像和临时容器，验收及发布后均已清理。
 
 #### 测试、结果与风险
 
@@ -32,6 +32,7 @@
 - 测试 VPS 上成功构建 V2.2.3 生产候选镜像；使用不写回候选镜像的一次性测试容器安装开发依赖后，完整 Python 测试为 `93 passed`。
 - 运行态验收确认容器 `healthy`、版本 `2.2.3`、OOM 为 false、重启次数为 0，Uvicorn PID 1 的 UID 为 `1000`；未登录管理页面 `303` 回退登录页，空标签引导、创建测试标签后的普通图片/归档多标签控件及内联上传进度逻辑通过真实 HTTP/HTML 合同检查。
 - 原有 10 个容器的 ID、镜像和名称等稳定字段验收前后一致；本轮测试容器、候选镜像和远程隔离目录均已清理，长期 VPS SSH 密钥按约定保留。
+- V2.2.3 源码提交 `9e2282783b331e2c80b3aa83f8c1fecaf57b520f` 已同步 GitHub `main`；Docker Hub `v2` 已发布为 `linux/amd64`，发布后 Registry 回读确认 Manifest 摘要为 `sha256:4b752bb391020f90fbf15c5e902d2f767b7b62d702e5731ab21ee80a13ccf82a`、Config 摘要为 `sha256:bb31ae8011517dfffd685fc8063717793e630211da46844224dad52738128fff`，共 12 层。镜像版本由 `app/__init__.py` 提供，隔离容器 `/health` 已实际核验为 `2.2.3`。
 - 已知风险：前端校验只改善体验，不能成为信任边界；服务端 CSRF、实际图片解码、请求/图片/归档限额和两阶段标签验证继续承担安全约束。Cloudflare 在应用前拒绝的请求无法由应用返回自定义页面，只能由 XHR 根据状态码给出提示。本轮未实际通过 Cloudflare 上传 2.56 GiB 文件，也未执行浏览器视觉验收。
 
 V2.2.2 修复命令行归档导入无法打标签、网页压缩包上传内存与临时文件生命周期、多标签归档关联，以及管理会话失效后 HTML 页面不返回登录页的问题。最终候选镜像完整测试为 `88 passed`，远程健康检查、未登录 HTML `GET` 的 `303` 登录回退和 Uvicorn PID 1 UID `1000` 均通过；发布前后原有 10 个容器快照一致，隔离容器、候选镜像、临时认证和目录均已清理。Docker Hub `qinlingmonkey/random-image-api:v2` 已发布为 V2.2.2、平台 `linux/amd64`；独立回读确认 Manifest/Registry 摘要为 `sha256:7ca9a5958242417a0b1f9b5b5609a437f8158db55ab5323e989adcd098d0ae2f`，Config 摘要为 `sha256:0c1a92c610d5af76bb115f8ceab8d4b70f10be778ee5cef6b0843b7b83267ef3`，共 12 层，Entrypoint 为 `/usr/local/bin/docker-entrypoint.sh`。源码功能提交 `d8752a0321404d8ad7ec2cfa3e2c8d06bf9bbd2b` 已同步 GitHub `main`；长期复用 SSH 密钥按约定保留。

@@ -4,15 +4,15 @@ Random Image API V2 是 V1 的向后兼容扩展，增加 tags、多对多主题
 
 ## 发布状态（请先阅读）
 
-- **当前候选源码版本**：V2.2.3，已完成远程隔离构建、93 项 Python 测试与运行态验收，等待本轮发布
-- **当前发布镜像版本**：V2.2.2（本轮发布前）
+- **当前源码与发布镜像版本**：V2.2.3，已完成远程隔离构建、93 项 Python 测试、运行态验收与发布后 Registry 回读
 - **当前发布镜像**：`qinlingmonkey/random-image-api:v2`
-- **V2.2.3 候选验收状态**：完整测试为 `93 passed`，Node 上传校验测试通过；容器 `healthy`、版本 `2.2.3`、未登录管理 HTML `GET` 的 `303` 登录回退、PID 1 UID `1000`、上传进度与多标签页面合同和原有 10 个容器稳定字段比对均通过
+- **V2.2.3 验收状态**：完整测试为 `93 passed`，Node 上传校验测试通过；容器 `healthy`、版本 `2.2.3`、未登录管理 HTML `GET` 的 `303` 登录回退、PID 1 UID `1000`、上传进度与多标签页面合同和原有 10 个容器稳定字段比对均通过
 - **平台**：`linux/amd64`
-- **V2.2.2 Manifest / Registry 摘要**：`sha256:7ca9a5958242417a0b1f9b5b5609a437f8158db55ab5323e989adcd098d0ae2f`
-- **V2.2.2 Config 摘要**：`sha256:0c1a92c610d5af76bb115f8ceab8d4b70f10be778ee5cef6b0843b7b83267ef3`
+- **V2.2.3 Manifest / Registry 摘要**：`sha256:4b752bb391020f90fbf15c5e902d2f767b7b62d702e5731ab21ee80a13ccf82a`
+- **V2.2.3 Config 摘要**：`sha256:bb31ae8011517dfffd685fc8063717793e630211da46844224dad52738128fff`
 - **镜像结构**：12 层；Entrypoint `/usr/local/bin/docker-entrypoint.sh`
-- **V2.2.2 源码功能提交**：`d8752a0321404d8ad7ec2cfa3e2c8d06bf9bbd2b`（已同步 GitHub `main`）
+- **V2.2.3 源码功能提交**：`9e2282783b331e2c80b3aa83f8c1fecaf57b520f`（已同步 GitHub `main`）
+- **V2.2.2 历史摘要**：Registry `sha256:7ca9a5958242417a0b1f9b5b5609a437f8158db55ab5323e989adcd098d0ae2f`；Config `sha256:0c1a92c610d5af76bb115f8ceab8d4b70f10be778ee5cef6b0843b7b83267ef3`
 - **V2.2.1 历史摘要**：Registry `sha256:bd1dc2e6fa5b0882cb9fb3d6bf8816d2f175e7bd05624b3140544d9efefbbda8`；Config `sha256:1088deae369cf6e5a3e370dc4beaf7399b672cb6988ec5686cd9d3b316956633`
 - **V2.2.0 历史摘要**：Registry `sha256:268860bd1cb046f9a7f9f34dfc6ec6396e5748993f67d91cd202032f2189e490`；Config `sha256:faa555405f7b82bd824ee741791fbd8adfa3823b47b5289bddc825483e2cdd32`
 - **兼容回滚版本**：`qinlingmonkey/random-image-api:v1`，继续保留且不会被 V2 覆盖
