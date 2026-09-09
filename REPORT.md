@@ -2,7 +2,44 @@
 
 ## 1. 报告范围
 
-本报告记录 Random Image API V2.2 文档、当前实现与发布状态。源码与 Docker Hub `qinlingmonkey/random-image-api:v2` 均已发布为 V2.2.3；远程隔离构建、完整测试、运行态验收和发布后 Registry 回读均已完成。V2.2 保留 V1/V2 API、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、tags 和主题接口，重点优化管理 UI、图片预览、物理目录整理与标签编辑。
+本报告记录 Random Image API V2.2 文档、当前实现与发布状态。源码与 Docker Hub `qinlingmonkey/random-image-api:v2` 均已发布为 V2.2.4；远程隔离构建、完整测试、运行态验收和发布后 Registry 回读均已完成。V2.2 保留 V1/V2 API、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、tags 和主题接口，重点优化管理 UI、图片预览、物理目录整理与标签编辑。
+
+### V2.2.4 用户文案与内部说明分层（已发布）
+
+#### 问题与设计结论
+
+V2.2.3 为解释超大归档上传问题，在管理页面直接展示了服务端临时目录、进程内状态、TTL、Cloudflare 临时存储及固定大小故障样例等实现说明。这些信息适合维护文档和实施报告，不适合作为普通管理员执行上传操作时的页面文案。V2.2.4 将两类信息分开：管理页面仅保留当前操作所需的支持格式、动态上限、标签作用范围、上传/校验状态和可执行错误恢复建议；内部存储生命周期、代理边界和故障分析继续记录在技术文档中。
+
+#### 实现方案
+
+- 重写普通图片与归档上传区说明，删除服务端路径、进程状态、代理品牌、固定文件大小和故障案例等内部细节。
+- 上传错误统一为简短、可行动的中文提示，不向用户暴露 multipart、临时目录或上游状态实现。
+- 归档 preview 不再输出 Python 字典或内部字段，改为“归档内容、检查图片、可导入、重复、跳过、横屏、竖屏、方形”的结构化中文摘要。
+- 明确上传页所选标签作用于本次全部图片，并在确认页保留且允许调整；空标签时提供创建标签或稍后处理的正常路径。
+- 保留 V2.2.3 的流式 multipart、磁盘 spool、请求与归档限额、CSRF、会话绑定、安全解压、哈希校验和失败清理等服务端安全边界，仅调整对用户的呈现。
+
+#### 创建和修改的文件
+
+- 功能与版本：`app/__init__.py`、`app/admin.py`、`app/admin_upload.js`。
+- 回归测试：`tests/test_admin.py`、`tests/test_admin_upload.js`、`tests/test_api.py`。
+- 发布文档：`README.md`、`MIGRATION.md`、`REPORT.md`、`DOCKERHUB_OVERVIEW.md`。
+
+#### 实际测试与发布结果
+
+- `node tests/test_admin_upload.js`：通过；`node --check app/admin_upload.js`：通过。
+- Python `compileall`、Shell 语法、Markdown/Secret 检查和 `git diff --check`：通过。
+- 测试 VPS 隔离构建成功，完整 Python 测试为 `93 passed`。
+- 真实隔离容器为 `healthy`，`/health` 返回版本 `2.2.4`，Uvicorn PID 1 UID 为 `1000`。
+- 管理总览与归档 preview 的 HTTP/HTML 合同验收通过：必要操作文案和结构化摘要存在，内部路径、内部字段、原始字典、代理品牌与固定故障样例不出现在页面中。
+- 原有 10 个 VPS 容器前后稳定字段一致；测试容器、候选镜像、临时源码、临时登录配置和发布 Token 副本均已清理。
+- 功能提交 `8fdc465972f6cb9f53cd4eb58b9d22ddb35c7ade` 已同步 GitHub `main`。
+- Docker Hub `qinlingmonkey/random-image-api:v2` 已发布为 `linux/amd64`；Registry 回读确认 Manifest 摘要为 `sha256:d00a6f75f028a913cb33062f80d9e3de68da6f82b4e88fb402b7cf64194257da`，Config 摘要为 `sha256:483a5c6f60e276eaf1343f444158700ef89cfe2f1dba50267b27c82cefef64e9`，共 12 层。
+
+#### 已知风险与后续建议
+
+- 本轮没有改变应用、反向代理或 CDN 的实际上传上限；大文件仍受整条上传链路中最小限制约束。
+- 本轮执行了真实 HTTP/HTML 验收，但未通过公网域名重新上传多 GiB 归档，也未执行浏览器视觉回归。
+- 若后续需要支持多 GiB 网页上传，应单独设计可续传/分片协议和持久任务状态，而不是继续扩大单次 multipart 请求。
 
 ### V2.2.3 聚焦修复（已发布）
 

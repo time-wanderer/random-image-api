@@ -2,7 +2,7 @@
 
 Random Image API V2 是 V1 的**向后兼容扩展**：保留 V1 的 `GET /random`、`?type=`、本地图库、WebDAV Hybrid、默认 90% 远程优先、缓存、归档 importer、Backup / Restore，并新增主题标签和安全管理 UI。V2.2 在不改变 API 和数据库 schema 的前提下，重点优化管理网页与本地图片整理体验。
 
-> 当前源码与 Docker Hub `qinlingmonkey/random-image-api:v2` 均已发布为 V2.2.3。本补丁为普通图片和归档上传增加客户端类型/大小校验、归档真实上传进度和代理错误恢复，并让归档 preview 保留上传前选择的标签。远程隔离构建、93 项 Python 测试及运行态验收均已通过；发布镜像为 `linux/amd64`，Manifest/Registry 摘要为 `sha256:4b752bb391020f90fbf15c5e902d2f767b7b62d702e5731ab21ee80a13ccf82a`。`v1` 继续保留用于旧部署与回滚。
+> 当前源码与 Docker Hub `qinlingmonkey/random-image-api:v2` 均已发布为 V2.2.4。本补丁重新梳理管理端信息层级：页面只显示用户完成上传、预览、标签选择和错误恢复所需的信息，不再混入服务端临时目录、进程状态、代理实现或固定故障样例等内部说明；归档预览改为结构化中文摘要。远程隔离构建、93 项 Python 测试及运行态验收均已通过；发布镜像为 `linux/amd64`，Manifest/Registry 摘要为 `sha256:d00a6f75f028a913cb33062f80d9e3de68da6f82b4e88fb402b7cf64194257da`。`v1` 继续保留用于旧部署与回滚。
 
 V1 快照见 [docs/V1.md](docs/V1.md)，V1 原地升级和 VPS 迁移见 [MIGRATION.md](MIGRATION.md)。
 
@@ -369,8 +369,8 @@ python -m compileall -q app tests
 bash -n scripts/*.sh docker-entrypoint.sh
 ```
 
-V2.2.3 最终候选镜像的完整 Python 测试为 `93 passed`，Node 上传校验行为测试通过。本轮还执行了 Python `compileall`、Node `--check`、Shell 语法和 `git diff --check`，并完成远程隔离运行态验收：容器为 `healthy`、版本为 `2.2.3`、Uvicorn PID 1 的 UID 为 `1000`，未登录访问管理 HTML 页面返回 `303` 并定位到 `/manage-images/login`；空标签引导、创建标签后的普通图片/归档多标签控件及内联上传进度逻辑均通过 HTTP/HTML 合同检查。原有 10 个容器的 ID、镜像和名称等稳定字段一致，测试容器、候选镜像和临时目录均已清理。生产镜像按精简设计只安装运行依赖，不内置 `pytest`；测试进程清除了生产镜像固定的路径类环境变量，仅用于验证未配置时的默认路径推导。本轮未执行真实 2.56 GiB 上传或浏览器视觉验收。
+V2.2.4 最终候选镜像的完整 Python 测试为 `93 passed`，Node 上传校验行为测试通过。本轮还执行了 Python `compileall`、Node `--check`、Shell 语法和 `git diff --check`，并完成远程隔离运行态验收：容器为 `healthy`、版本为 `2.2.4`、Uvicorn PID 1 的 UID 为 `1000`；管理总览和归档预览的用户文案、结构化摘要、标签提示及内部信息隔离均通过真实 HTTP/HTML 合同检查。原有 10 个容器的稳定字段一致，测试容器、候选镜像和临时目录均已清理。
 
-Docker Hub `v2` 已发布为 V2.2.2；独立回读确认 Manifest/Registry 摘要为 `sha256:7ca9a5958242417a0b1f9b5b5609a437f8158db55ab5323e989adcd098d0ae2f`，Config 摘要为 `sha256:0c1a92c610d5af76bb115f8ceab8d4b70f10be778ee5cef6b0843b7b83267ef3`，平台为 `linux/amd64`，共 12 层。
+Docker Hub `v2` 已发布为 V2.2.4；独立回读确认 Manifest/Registry 摘要为 `sha256:d00a6f75f028a913cb33062f80d9e3de68da6f82b4e88fb402b7cf64194257da`，Config 摘要为 `sha256:483a5c6f60e276eaf1343f444158700ef89cfe2f1dba50267b27c82cefef64e9`，平台为 `linux/amd64`，共 12 层。
 
 当前 V2 实施与验证记录见 [REPORT.md](REPORT.md)。

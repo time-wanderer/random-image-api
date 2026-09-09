@@ -4,14 +4,15 @@ Random Image API V2 是 V1 的向后兼容扩展，增加 tags、多对多主题
 
 ## 发布状态（请先阅读）
 
-- **当前源码与发布镜像版本**：V2.2.3，已完成远程隔离构建、93 项 Python 测试、运行态验收与发布后 Registry 回读
+- **当前源码与发布镜像版本**：V2.2.4，已完成远程隔离构建、93 项 Python 测试、运行态验收与发布后 Registry 回读
 - **当前发布镜像**：`qinlingmonkey/random-image-api:v2`
-- **V2.2.3 验收状态**：完整测试为 `93 passed`，Node 上传校验测试通过；容器 `healthy`、版本 `2.2.3`、未登录管理 HTML `GET` 的 `303` 登录回退、PID 1 UID `1000`、上传进度与多标签页面合同和原有 10 个容器稳定字段比对均通过
+- **V2.2.4 验收状态**：完整测试为 `93 passed`，Node 上传校验测试通过；容器 `healthy`、版本 `2.2.4`、PID 1 UID `1000`，管理总览与归档预览的用户文案、结构化摘要、标签提示和内部信息隔离均通过 HTTP/HTML 合同检查
 - **平台**：`linux/amd64`
-- **V2.2.3 Manifest / Registry 摘要**：`sha256:4b752bb391020f90fbf15c5e902d2f767b7b62d702e5731ab21ee80a13ccf82a`
-- **V2.2.3 Config 摘要**：`sha256:bb31ae8011517dfffd685fc8063717793e630211da46844224dad52738128fff`
+- **V2.2.4 Manifest / Registry 摘要**：`sha256:d00a6f75f028a913cb33062f80d9e3de68da6f82b4e88fb402b7cf64194257da`
+- **V2.2.4 Config 摘要**：`sha256:483a5c6f60e276eaf1343f444158700ef89cfe2f1dba50267b27c82cefef64e9`
 - **镜像结构**：12 层；Entrypoint `/usr/local/bin/docker-entrypoint.sh`
-- **V2.2.3 源码功能提交**：`9e2282783b331e2c80b3aa83f8c1fecaf57b520f`（已同步 GitHub `main`）
+- **V2.2.4 源码功能提交**：`8fdc465972f6cb9f53cd4eb58b9d22ddb35c7ade`（已同步 GitHub `main`）
+- **V2.2.3 历史摘要**：Registry `sha256:4b752bb391020f90fbf15c5e902d2f767b7b62d702e5731ab21ee80a13ccf82a`；Config `sha256:bb31ae8011517dfffd685fc8063717793e630211da46844224dad52738128fff`
 - **V2.2.2 历史摘要**：Registry `sha256:7ca9a5958242417a0b1f9b5b5609a437f8158db55ab5323e989adcd098d0ae2f`；Config `sha256:0c1a92c610d5af76bb115f8ceab8d4b70f10be778ee5cef6b0843b7b83267ef3`
 - **V2.2.1 历史摘要**：Registry `sha256:bd1dc2e6fa5b0882cb9fb3d6bf8816d2f175e7bd05624b3140544d9efefbbda8`；Config `sha256:1088deae369cf6e5a3e370dc4beaf7399b672cb6988ec5686cd9d3b316956633`
 - **V2.2.0 历史摘要**：Registry `sha256:268860bd1cb046f9a7f9f34dfc6ec6396e5748993f67d91cd202032f2189e490`；Config `sha256:faa555405f7b82bd824ee741791fbd8adfa3823b47b5289bddc825483e2cdd32`
@@ -20,7 +21,7 @@ Random Image API V2 是 V1 的向后兼容扩展，增加 tags、多对多主题
 
 V2 是 V1 的扩展：旧的 `/random`、`?type=`、本地图库和 WebDAV Hybrid 部署可以继续使用；升级前仍应先备份 SQLite 与永久图片。
 
-正式发布镜像的发布前验收使用一次性测试容器另行提供开发测试依赖；生产镜像按精简设计只安装运行依赖，不内置 `pytest`。生产镜像显式设置 `CACHE_DIR=/app/data/cache/webdav`，因此测试进程必须使用 `env -u CACHE_DIR`，以验证未显式配置缓存目录时会随临时 `DATA_DIR` 派生缓存路径；该操作仅隔离测试环境变量，不改变正式容器配置。本轮验证了版本 `2.2.1`、健康状态、UID `1000`、未登录 `401`、登录/CSRF、真实 PNG 上传、无标签筛选与标签关系变化、SQLite 关系、正式数据布局下的备份内容与脱敏。验收仅使用真实 HTTP/HTML 管理流程，未执行浏览器视觉验收；隔离容器、候选镜像和临时目录已清理，原有容器快照前后一致。正式发布后已独立回读并确认上述镜像元数据。
+V2.2.4 将管理页面与内部技术说明明确分层：页面仅展示支持格式、当前配置上限、标签作用范围、上传状态和可执行错误提示；服务端临时目录、进程状态、代理实现及固定故障样例不再出现在操作页面。归档 preview 使用结构化中文摘要，确认前仍可调整本次全部图片的标签。正式发布后已独立回读并确认上述镜像元数据。
 
 ## 1. 使用 V2 镜像快速部署
 
