@@ -191,6 +191,8 @@ curl -D headers.txt -o image.bin 'http://127.0.0.1:10086/random?tag=anime&type=d
 
 ## 5. 本地图片与 importer
 
+> 完整的 Docker Compose 命令行导入流程、路径引用、多标签、大归档限制、磁盘空间和常见错误说明，请直接查看：[归档导入 CLI 使用手册](docs/CLI_IMPORT.md)。首次使用建议先阅读该手册并执行 `--dry-run`。
+
 可把图片放入：
 
 ```text
@@ -297,7 +299,7 @@ ADMIN_PAGE_SIZE=20
 
 归档限制还可通过 `ADMIN_MAX_ARCHIVE_BYTES`、`ADMIN_MAX_ARCHIVE_MEMBERS`、`ADMIN_MAX_ARCHIVE_MEMBER_BYTES`、`ADMIN_MAX_ARCHIVE_TOTAL_BYTES`、`ADMIN_MAX_ARCHIVE_COMPRESSION_RATIO` 调整；默认 `ADMIN_MAX_ARCHIVE_BYTES=536870912`（512 MiB），本补丁没有提高该值。图片像素上限使用 `ADMIN_MAX_IMAGE_PIXELS`，临时目录使用 `UPLOAD_TMP_DIR`。
 
-若站点经过 Cloudflare，网页实际上传上限取应用 `ADMIN_MAX_ARCHIVE_BYTES`、Cloudflare 当前计划上限及站点 **Network → Maximum Upload Size** 配置三者中的较小值。超过 Cloudflare 边界会在请求到达应用前返回 `413`；调低 Network 配置也会触发 `413`。2.56 GiB 归档不适合网页上传路径，请使用上面的 CLI。
+若站点经过 Cloudflare，网页实际上传上限取应用 `ADMIN_MAX_ARCHIVE_BYTES`、Cloudflare 当前计划上限及站点 **Network → Maximum Upload Size** 配置三者中的较小值。超过 Cloudflare 边界会在请求到达应用前返回 `413`；调低 Network 配置也会触发 `413`。多 GiB 归档通常不适合单次网页上传路径，请使用上面的 CLI。
 
 ### 安全边界
 

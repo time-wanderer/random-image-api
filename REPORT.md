@@ -22,7 +22,7 @@ V2.2.3 为解释超大归档上传问题，在管理页面直接展示了服务�
 
 - 功能与版本：`app/__init__.py`、`app/admin.py`、`app/admin_upload.js`。
 - 回归测试：`tests/test_admin.py`、`tests/test_admin_upload.js`、`tests/test_api.py`。
-- 发布文档：`README.md`、`MIGRATION.md`、`REPORT.md`、`DOCKERHUB_OVERVIEW.md`。
+- 发布文档：`README.md`、`MIGRATION.md`、`REPORT.md`、`DOCKERHUB_OVERVIEW.md`；新增独立的 `docs/CLI_IMPORT.md`，并从 README 的 importer 章节提供直达链接。CLI 手册将首次使用中容易遇到的路径引用、Compose 挂载、预检、多标签、大归档限制、磁盘空间、重扫与验证问题整理为通用说明，不记录任何单次导入的文件名、图片数量、域名、用户名或服务器绝对路径。
 
 #### 实际测试与发布结果
 
@@ -45,7 +45,7 @@ V2.2.3 为解释超大归档上传问题，在管理页面直接展示了服务�
 
 #### 网络调研与限制结论
 
-本轮实际检索并核对 Cloudflare 官方 Error 413 与 Workers Limits 文档。官方当前列出的最大请求体为 Free/Pro 100 MB、Business 200 MB、Enterprise 默认 500 MB；Enterprise 可在站点 **Network → Maximum Upload Size** 自助调整至 5 GB，更大值需联系 Cloudflare。站点配置低于请求大小时同样返回 `413`。因此网页有效上限取应用 `ADMIN_MAX_ARCHIVE_BYTES`、Cloudflare 计划边界和 Network 配置中的较小值；应用默认 512 MiB 未提高。2.56 GiB 不适合网页路径，应使用 CLI。
+本轮实际检索并核对 Cloudflare 官方 Error 413 与 Workers Limits 文档。官方当前列出的最大请求体为 Free/Pro 100 MB、Business 200 MB、Enterprise 默认 500 MB；Enterprise 可在站点 **Network → Maximum Upload Size** 自助调整至 5 GB，更大值需联系 Cloudflare。站点配置低于请求大小时同样返回 `413`。因此网页有效上限取应用 `ADMIN_MAX_ARCHIVE_BYTES`、Cloudflare 计划边界和 Network 配置中的较小值；应用默认 512 MiB 未提高。多 GiB 归档通常不适合单次网页上传路径，应使用 CLI。
 
 #### 实现方案
 
@@ -70,7 +70,7 @@ V2.2.3 为解释超大归档上传问题，在管理页面直接展示了服务�
 - 运行态验收确认容器 `healthy`、版本 `2.2.3`、OOM 为 false、重启次数为 0，Uvicorn PID 1 的 UID 为 `1000`；未登录管理页面 `303` 回退登录页，空标签引导、创建测试标签后的普通图片/归档多标签控件及内联上传进度逻辑通过真实 HTTP/HTML 合同检查。
 - 原有 10 个容器的 ID、镜像和名称等稳定字段验收前后一致；本轮测试容器、候选镜像和远程隔离目录均已清理，长期 VPS SSH 密钥按约定保留。
 - V2.2.3 源码提交 `9e2282783b331e2c80b3aa83f8c1fecaf57b520f` 已同步 GitHub `main`；Docker Hub `v2` 已发布为 `linux/amd64`，发布后 Registry 回读确认 Manifest 摘要为 `sha256:4b752bb391020f90fbf15c5e902d2f767b7b62d702e5731ab21ee80a13ccf82a`、Config 摘要为 `sha256:bb31ae8011517dfffd685fc8063717793e630211da46844224dad52738128fff`，共 12 层。镜像版本由 `app/__init__.py` 提供，隔离容器 `/health` 已实际核验为 `2.2.3`。
-- 已知风险：前端校验只改善体验，不能成为信任边界；服务端 CSRF、实际图片解码、请求/图片/归档限额和两阶段标签验证继续承担安全约束。Cloudflare 在应用前拒绝的请求无法由应用返回自定义页面，只能由 XHR 根据状态码给出提示。本轮未实际通过 Cloudflare 上传 2.56 GiB 文件，也未执行浏览器视觉验收。
+- 已知风险：前端校验只改善体验，不能成为信任边界；服务端 CSRF、实际图片解码、请求/图片/归档限额和两阶段标签验证继续承担安全约束。Cloudflare 在应用前拒绝的请求无法由应用返回自定义页面，只能由 XHR 根据状态码给出提示。本轮未实际通过公网代理上传多 GiB 归档，也未执行浏览器视觉验收。
 
 V2.2.2 修复命令行归档导入无法打标签、网页压缩包上传内存与临时文件生命周期、多标签归档关联，以及管理会话失效后 HTML 页面不返回登录页的问题。最终候选镜像完整测试为 `88 passed`，远程健康检查、未登录 HTML `GET` 的 `303` 登录回退和 Uvicorn PID 1 UID `1000` 均通过；发布前后原有 10 个容器快照一致，隔离容器、候选镜像、临时认证和目录均已清理。Docker Hub `qinlingmonkey/random-image-api:v2` 已发布为 V2.2.2、平台 `linux/amd64`；独立回读确认 Manifest/Registry 摘要为 `sha256:7ca9a5958242417a0b1f9b5b5609a437f8158db55ab5323e989adcd098d0ae2f`，Config 摘要为 `sha256:0c1a92c610d5af76bb115f8ceab8d4b70f10be778ee5cef6b0843b7b83267ef3`，共 12 层，Entrypoint 为 `/usr/local/bin/docker-entrypoint.sh`。源码功能提交 `d8752a0321404d8ad7ec2cfa3e2c8d06bf9bbd2b` 已同步 GitHub `main`；长期复用 SSH 密钥按约定保留。
 
