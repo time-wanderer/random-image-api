@@ -216,7 +216,26 @@ def test_archive_preview_does_not_write_then_confirm_imports_and_maps_tags(admin
                 follow_redirects=False,
             ).status_code == 303
         token, response = preview(client, csrf, payload)
-        assert "dry_run" in response.text
+        assert all(fragment in response.text for fragment in (
+            "导入摘要",
+            "<dt>归档内容</dt><dd>2</dd>",
+            "<dt>检查图片</dt><dd>2</dd>",
+            "<dt>可导入</dt><dd>2</dd>",
+            "<dt>重复</dt><dd>0</dd>",
+            "<dt>跳过</dt><dd>0</dd>",
+            "<dt>横屏</dt><dd>1</dd>",
+            "<dt>竖屏</dt><dd>1</dd>",
+            "<dt>方形</dt><dd>0</dd>",
+        ))
+        assert "<pre>" not in response.text
+        assert all(field not in response.text for field in (
+            "output_dir", "dry_run", "square_policy", "square_both_storage",
+            "files_examined", "bytes_read", "tag_targets", "created_paths",
+        ))
+        assert "{'archive':" not in response.text
+        assert "photos.zip" not in response.text
+        assert str(settings.upload_tmp_dir) not in response.text
+        assert str(settings.images_dir) not in response.text
         assert "追加标签（可多选）" in response.text
         assert 'name="tags" value="featured"' in response.text
         assert 'name="tags" value="seasonal"' in response.text
@@ -872,7 +891,12 @@ def test_untagged_filter_empty_state_and_reserved_value_contract(admin_env) -> N
 def test_upload_forms_expose_client_validation_progress_and_fallback(admin_env) -> None:
     settings, app = admin_env
     with new_client(app) as client:
-        login(client)
+        csrf = login(client)
+        assert client.post(
+            f"{ADMIN}/tags",
+            data={"csrf": csrf, "slug": "upload-test", "display_name": "上传测试"},
+            follow_redirects=False,
+        ).status_code == 303
         page = client.get(ADMIN).text
 
     assert f'data-upload-kind="image" data-max-bytes="{settings.admin_max_upload_bytes}"' in page
@@ -884,6 +908,16 @@ def test_upload_forms_expose_client_validation_progress_and_fallback(admin_env) 
         "XMLHttpRequest", "new FormData(form)", "xhr.upload.onprogress",
         "data-upload-error", "data-upload-status", "xhr.timeout",
         "[413,502,503,504,520,522,524]",
+    ))
+    assert all(text in page for text in (
+        "支持 JPG、JPEG、PNG、WebP", "支持 ZIP、TAR.GZ、TGZ",
+        "网页上限 2.00 MiB", "上传前所选标签将应用于本次全部图片",
+        "归档确认页可调整", "上传中…", "正在安全校验并生成预览",
+        "可能超过上传链路限制，请减小文件或使用命令行导入",
+    ))
+    assert all(text not in page for text in (
+        "UPLOAD_TMP_DIR", "进程内存", "TTL", "浏览器", "边缘临时存储",
+        "Cloudflare", "2.56 GiB", "代理限制", "CLI",
     ))
 
 
@@ -906,6 +940,7 @@ def test_archive_preview_preserves_selected_tags_and_confirm_revalidates(admin_e
         assert response.status_code == 200
         assert re.search(r'<option value="primary" selected>', response.text)
         assert re.search(r'name="tags" value="extra" checked', response.text)
+        assert "确认前仍可调整本次全部图片的标签" in response.text
         token_match = re.search(r'name="token" value="([^"]+)"', response.text)
         assert token_match
         token = token_match.group(1)

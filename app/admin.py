@@ -354,20 +354,20 @@ def _safe_db_file(root_value: Path | str, stored_name: str) -> Path:
     root = Path(root_value).resolve()
     relative = Path(stored_name)
     if relative.is_absolute() or ".." in relative.parts:
-        raise HTTPException(400, "unsafe stored path")
+        raise HTTPException(400, "文件位置无效")
     lexical = root / relative
     current = root
     for part in relative.parts:
         current = current / part
         if current.is_symlink():
-            raise HTTPException(404, "file unavailable")
+            raise HTTPException(404, "文件不可用")
     resolved = lexical.resolve()
     try:
         resolved.relative_to(root)
     except ValueError as exc:
-        raise HTTPException(400, "unsafe stored path") from exc
+        raise HTTPException(400, "文件位置无效") from exc
     if not resolved.is_file():
-        raise HTTPException(404, "file unavailable")
+        raise HTTPException(404, "文件不可用")
     return resolved
 
 
@@ -455,10 +455,10 @@ def create_admin_router(settings: Any) -> APIRouter:
             if request.method == "GET":
                 raise HTTPException(
                     status_code=303,
-                    detail="authentication required",
+                    detail="请先登录管理端",
                     headers={"Location": f"{admin_path}/login"},
                 )
-            raise HTTPException(401, "authentication required")
+            raise HTTPException(401, "请先登录管理端")
 
         raw = request.cookies.get(cookie_name, "")
         try:
@@ -482,15 +482,15 @@ def create_admin_router(settings: Any) -> APIRouter:
         try:
             declared = int(request.headers.get("content-length", "0"))
         except ValueError:
-            raise HTTPException(400, "invalid Content-Length")
+            raise HTTPException(400, "请求大小信息无效")
         if declared < 0:
-            raise HTTPException(400, "invalid Content-Length")
+            raise HTTPException(400, "请求大小信息无效")
         if declared > request_max:
-            raise HTTPException(413, "request body too large")
+            raise HTTPException(413, "上传内容超过网页上限，请减小文件或使用命令行导入。")
         if not content_type:
             return FormData()
 
-        stream_limit_message = "request body too large"
+        stream_limit_message = "上传内容超过网页上限，请减小文件或使用命令行导入。"
 
         async def limited_stream():
             received = 0
@@ -517,7 +517,7 @@ def create_admin_router(settings: Any) -> APIRouter:
                     max_part_size=upload_max,
                 ).parse()
             else:
-                raise HTTPException(415, "unsupported form content type")
+                raise HTTPException(415, "提交格式不受支持，请刷新页面后重试。")
             request._form = parsed
             return parsed
         except HTTPException:
@@ -526,15 +526,15 @@ def create_admin_router(settings: Any) -> APIRouter:
             status = 413 if exc.message == stream_limit_message else 400
             raise HTTPException(status, exc.message) from exc
         except Exception as exc:
-            raise HTTPException(400, "cannot read form data") from exc
-        raise HTTPException(415, "unsupported form content type")
+            raise HTTPException(400, "无法读取提交内容，请重新选择文件后重试。") from exc
+        raise HTTPException(415, "提交格式不受支持，请刷新页面后重试。")
 
     async def write_auth(request: Request) -> tuple[str, _Session, Any]:
         sid, session = authenticate(request)
         form = await form_data(request)
         supplied = str(form.get("csrf", ""))
         if not hmac.compare_digest(supplied, session.csrf):
-            raise HTTPException(403, "invalid CSRF token")
+            raise HTTPException(403, "页面已失效，请刷新后重试。")
         return sid, session, form
 
     def scan(request: Request) -> None:
@@ -569,7 +569,7 @@ def create_admin_router(settings: Any) -> APIRouter:
             logout = f'<form method="post" action="{_escape(admin_path)}/logout" onsubmit="return confirm(\'确定退出管理端？\')">{hidden(csrf)}<button class="secondary">退出</button></form>'
         return f'<nav class="main-nav" aria-label="主导航">{items}</nav>{logout}'
 
-    def tag_inputs(rows: list[Any]) -> str:
+    def tag_inputs(rows: list[Any], *, adjustable_on_confirm: bool = False) -> str:
         if not rows:
             return '<p class="muted">当前还没有标签，请先创建标签。<a class="button" href="' + _escape(admin_path) + '/tags">创建第一个标签</a></p>'
         options = '<option value="">不添加标签（可选）</option>' + "".join(
@@ -580,7 +580,8 @@ def create_admin_router(settings: Any) -> APIRouter:
             f'<label><input type="checkbox" name="tags" value="{_escape(row["slug"])}"> {_escape(row["display_name"])} — {_escape(row["slug"])}</label> '
             for row in rows
         )
-        return f'<p class="muted">上传后添加标签（可选）；不选择表示不添加标签。</p><label>上传后添加标签（可选） <select name="default_tag">{options}</select></label><fieldset><legend>附加标签（可选）</legend>{checks}</fieldset>'
+        adjustment = "归档确认页可调整。" if adjustable_on_confirm else ""
+        return f'<p class="muted">上传前所选标签将应用于本次全部图片；不选择则不添加标签。{adjustment}</p><label>主标签（可选） <select name="default_tag">{options}</select></label><fieldset><legend>附加标签（可选）</legend>{checks}</fieldset>'
 
     @router.get("/login", response_class=HTMLResponse)
     def login_page() -> HTMLResponse:
@@ -598,12 +599,12 @@ def create_admin_router(settings: Any) -> APIRouter:
         recent = [stamp for stamp in failures.get(ip, []) if stamp > now - login_window]
         failures[ip] = recent
         if len(recent) >= login_attempts:
-            raise HTTPException(429, "too many login attempts", headers={"Retry-After": str(login_window)})
+            raise HTTPException(429, "登录尝试过多，请稍后重试。", headers={"Retry-After": str(login_window)})
         form = await form_data(request)
         supplied = str(form.get("token", ""))
         if not hmac.compare_digest(supplied, expected_token):
             recent.append(now)
-            raise HTTPException(401, "invalid token")
+            raise HTTPException(401, "登录凭据无效。")
         failures.pop(ip, None)
         sid = secrets.token_urlsafe(32)
         expires = int(now + session_ttl)
@@ -657,7 +658,7 @@ def create_admin_router(settings: Any) -> APIRouter:
             '<section class="management-grid">'
             f'<section class="panel" id="upload"><h3>上传图片</h3><p class="muted">支持 JPG、JPEG、PNG、WebP；可多选。标签为空时，图片仍可先上传，之后在图片库补充。</p>'
             f'<form data-upload-form="1" data-upload-kind="image" data-max-bytes="{upload_max}" method="post" action="{_escape(admin_path)}/upload" enctype="multipart/form-data">{hidden(session.csrf)}{tag_inputs(tag_rows)}<label class="file-picker" data-drop-zone="1">选择图片<span class="help-text" data-file-summary>拖拽文件到此处，或点击选择；每个文件网页上限 {upload_max / 1024 / 1024:.2f} MiB；无 JS 时仍可普通上传</span><input type="file" data-upload-input="1" name="files" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" multiple required></label><p class="alert error" role="alert" data-upload-error hidden></p><button type="submit">上传图片</button></form></section>'
-            f'<section class="panel"><h3>归档导入</h3><p class="muted">先预览内容和目录标签，确认后才会写入；上传前选择的标签应用于本次所有图片，空表示不加标签。</p><p class="help-text">preview 归档保存在服务端 UPLOAD_TMP_DIR，索引仅在进程内存；TTL、登出或重启会清理或失效。浏览器或 Cloudflare 可能使用本机或边缘临时存储。2.56 GiB 不适合网页路径，请使用 CLI。</p><form data-upload-form="1" data-upload-kind="archive" data-max-bytes="{int(getattr(settings, "admin_max_archive_bytes", importer.ImportLimits().max_archive_bytes))}" data-login-url="{_escape(admin_path)}/login" method="post" action="{_escape(admin_path)}/archives/preview" enctype="multipart/form-data">{hidden(session.csrf)}{tag_inputs(tag_rows)}<label class="file-picker" data-drop-zone="1">选择 ZIP / TAR 归档<span class="help-text" data-file-summary>支持 ZIP、TAR.GZ、TGZ；网页上限 {int(getattr(settings, "admin_max_archive_bytes", importer.ImportLimits().max_archive_bytes)) / 1024 / 1024:.2f} MiB</span><input type="file" data-upload-input="1" name="archive" accept=".zip,.tar.gz,.tgz" required></label><p class="alert error" role="alert" data-upload-error hidden></p><p class="message" role="status" aria-live="polite" data-upload-status hidden></p><button type="submit">预览归档</button></form></section>'
+            f'<section class="panel"><h3>归档导入</h3><p class="muted">上传后先预览，确认后才会导入。</p><form data-upload-form="1" data-upload-kind="archive" data-max-bytes="{int(getattr(settings, "admin_max_archive_bytes", importer.ImportLimits().max_archive_bytes))}" data-login-url="{_escape(admin_path)}/login" method="post" action="{_escape(admin_path)}/archives/preview" enctype="multipart/form-data">{hidden(session.csrf)}{tag_inputs(tag_rows, adjustable_on_confirm=True)}<label class="file-picker" data-drop-zone="1">选择 ZIP / TAR 归档<span class="help-text" data-file-summary>支持 ZIP、TAR.GZ、TGZ；网页上限 {int(getattr(settings, "admin_max_archive_bytes", importer.ImportLimits().max_archive_bytes)) / 1024 / 1024:.2f} MiB</span><input type="file" data-upload-input="1" name="archive" accept=".zip,.tar.gz,.tgz" required></label><p class="alert error" role="alert" data-upload-error hidden></p><p class="message" role="status" aria-live="polite" data-upload-status hidden></p><button type="submit">预览归档</button></form></section>'
             f'<section class="panel"><h3>WebDAV 与缓存</h3><p class="muted">WebDAV 只管理已索引对象；预览仅使用已有缓存。</p><div class="actions"><a class="button secondary" href="{_escape(admin_path)}/images?source=webdav">管理 WebDAV 图片</a>'
             f'<form method="post" action="{_escape(admin_path)}/cache/clear" onsubmit="return confirm(\'确定清理全部 WebDAV 缓存？\')">{hidden(session.csrf)}<button class="warning">清理 WebDAV 缓存</button></form></div></section>'
             '</section>'
@@ -673,7 +674,7 @@ def create_admin_router(settings: Any) -> APIRouter:
                 (image_id,),
             ).fetchone()
             if row is None or row["source"] != "local":
-                raise HTTPException(404, "local image not found")
+                raise HTTPException(404, "本地图片不存在")
             tag_rows = conn.execute(
                 "SELECT t.slug,t.display_name,t.enabled FROM image_tags x JOIN tags t ON t.id=x.tag_id WHERE x.image_id=? ORDER BY t.slug",
                 (image_id,),
@@ -690,7 +691,7 @@ def create_admin_router(settings: Any) -> APIRouter:
             f'<dl class="detail-grid"><dt>ID</dt><dd>{int(row["id"])}</dd><dt>文件名</dt><dd>{_escape(Path(rel_path).name)}</dd>'
             f'<dt>真实方向</dt><dd>{_escape(row["orientation"])}</dd><dt>尺寸</dt><dd>{int(row["width"])} × {int(row["height"])} px</dd>'
             f'<dt>文件大小</dt><dd>{int(row["file_size"])} bytes</dd><dt>格式</dt><dd>{_escape(row["format"])}</dd>'
-            f'<dt>物理存放目录</dt><dd>{_escape(group)}</dd><dt>相对路径</dt><dd><code>{_escape(rel_path)}</code></dd>'
+            f'<dt>存放目录</dt><dd>{_escape(group)}</dd><dt>文件位置</dt><dd><code>{_escape(rel_path)}</code></dd>'
             f'<dt>来源</dt><dd>{_escape(row["source"])}</dd><dt>启用状态</dt><dd>{"启用" if row["enabled"] else "禁用"}</dd>'
             f'<dt>缓存状态</dt><dd>管理员受保护预览</dd><dt>更新时间</dt><dd>{_escape(row["updated_at"])}</dd></dl>'
             f'<section class="tags"><strong>完整标签</strong><div>{tags_html}</div></section>'
@@ -702,7 +703,7 @@ def create_admin_router(settings: Any) -> APIRouter:
         with db.get_conn(settings.database_path) as conn:
             row = conn.execute("SELECT rel_path,content_type,source FROM images WHERE id=?", (image_id,)).fetchone()
         if row is None or row["source"] != "local":
-            raise HTTPException(404, "local image not found")
+            raise HTTPException(404, "本地图片不存在")
         target = _safe_db_file(settings.images_dir, str(row["rel_path"]))
         return FileResponse(target, media_type=str(row["content_type"]), headers={"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff"})
 
@@ -712,7 +713,7 @@ def create_admin_router(settings: Any) -> APIRouter:
         with db.get_conn(settings.database_path) as conn:
             row = conn.execute("SELECT c.cache_name,c.content_type FROM webdav_cache c JOIN webdav_objects o ON o.href=c.href WHERE c.href=?", (href,)).fetchone()
         if row is None:
-            raise HTTPException(404, "cached preview not found")
+            raise HTTPException(404, "缓存预览不存在")
         target = _safe_db_file(settings.cache_dir, str(row["cache_name"]))
         return FileResponse(target, media_type=str(row["content_type"]), headers={"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff"})
 
@@ -907,7 +908,7 @@ def create_admin_router(settings: Any) -> APIRouter:
         except ValueError as exc:
             return _error_page("创建标签失败", "标签格式或名称无效，请检查后重试。")
         except (sqlite3.IntegrityError, OSError):
-            return _error_page("创建标签失败", "标签无法保存，可能已存在或数据库暂时不可用。")
+            return _error_page("创建标签失败", "标签无法保存，名称可能已存在，请检查后重试。")
         return _redirect(f"{admin_path}/tags", "标签已创建")
 
     @router.post("/tags/{tag_id}/edit")
@@ -967,7 +968,7 @@ def create_admin_router(settings: Any) -> APIRouter:
                     return _error_page("合并标签失败", "源标签不存在", 404)
             scan(request)
         except sqlite3.IntegrityError:
-            return _error_page("合并标签失败", "标签合并违反数据库约束，请检查目标标签。", 409)
+            return _error_page("合并标签失败", "标签无法合并，请检查目标标签。", 409)
         except (sqlite3.Error, OSError):
             return _error_page("合并标签失败", "标签无法合并，请稍后重试。", 503)
         except (importer.ImportErrorBase, RuntimeError):
@@ -982,13 +983,13 @@ def create_admin_router(settings: Any) -> APIRouter:
             one = form.get("file")
             files = [one] if hasattr(one, "read") else []
         if not files:
-            raise HTTPException(400, "no files uploaded")
+            raise HTTPException(400, "请选择至少一个图片文件。")
         try:
             selected_slugs = _selected_tag_slugs(form)
             with db.get_conn(settings.database_path) as conn:
                 selected_tags = _require_existing_tags(conn, selected_slugs)
         except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
+            raise HTTPException(400, "所选标签无效或已停用，请重新选择。") from exc
         limits = _limits(settings)
         written: list[Path] = []
         digests: list[str] = []
@@ -997,13 +998,13 @@ def create_admin_router(settings: Any) -> APIRouter:
             for uploaded in files:
                 payload = await uploaded.read(upload_max + 1)
                 if len(payload) > upload_max:
-                    raise HTTPException(413, "upload too large")
+                    raise HTTPException(413, "图片超过网页单文件上限，请减小文件或使用命令行导入。")
                 try:
                     detected, width, height = importer._inspect_image(payload, limits.max_image_pixels)
                 except importer.ArchiveSecurityError as exc:
-                    raise HTTPException(400, str(exc)) from exc
+                    raise HTTPException(400, "图片不符合安全限制，请减小图片或更换文件。") from exc
                 except (UnidentifiedImageError, OSError, ValueError, SyntaxError) as exc:
-                    raise HTTPException(400, "invalid or unsupported image") from exc
+                    raise HTTPException(400, "图片无效或格式不受支持。") from exc
                 # Persist the visual orientation.  Catalog.read_image_meta reads
                 # pixel dimensions directly, so retaining only the EXIF flag
                 # would make a later scan reverse the admin upload classification.
@@ -1017,7 +1018,7 @@ def create_admin_router(settings: Any) -> APIRouter:
                     payload = normalized.getvalue()
                     width, height = visual.size
                 except (UnidentifiedImageError, OSError, ValueError, SyntaxError) as exc:
-                    raise HTTPException(400, "cannot normalize image") from exc
+                    raise HTTPException(400, "图片处理失败，请检查文件后重试。") from exc
                 digest = hashlib.sha256(payload).hexdigest()
                 if digest not in digests:
                     digests.append(digest)
@@ -1060,18 +1061,18 @@ def create_admin_router(settings: Any) -> APIRouter:
         _sid, _session, form = await write_auth(request)
         target_group = str(form.get("target", ""))
         if target_group not in {"desktop", "mobile", "square"}:
-            raise HTTPException(400, "invalid target directory")
+            raise HTTPException(400, "请选择有效的目标目录。")
         images_root = Path(settings.images_dir).resolve()
         target_dir = images_root / target_group
         target_dir.mkdir(parents=True, exist_ok=True)
         if target_dir.is_symlink() or target_dir.resolve().parent != images_root:
-            raise HTTPException(400, "unsafe target directory")
+            raise HTTPException(400, "目标目录无效。")
         with db.get_conn(settings.database_path) as conn:
             row = conn.execute(
                 "SELECT rel_path,source FROM images WHERE id=?", (image_id,)
             ).fetchone()
             if row is None or row["source"] != "local":
-                raise HTTPException(404, "local image not found")
+                raise HTTPException(404, "本地图片不存在")
             source = _safe_db_file(images_root, str(row["rel_path"]))
             if source.parent == target_dir:
                 return _redirect(f"{admin_path}/images?source=local", "图片已在目标目录")
@@ -1098,7 +1099,7 @@ def create_admin_router(settings: Any) -> APIRouter:
         _sid, _session, form = await write_auth(request)
         confirmation = str(form.get("confirm", ""))
         if confirmation not in {"1", "DELETE"}:
-            raise HTTPException(400, "explicit confirmation required")
+            raise HTTPException(400, "请确认后再删除图片。")
         quarantined: Path | None = None
         target: Path | None = None
         try:
@@ -1107,9 +1108,9 @@ def create_admin_router(settings: Any) -> APIRouter:
                     "SELECT rel_path,source FROM images WHERE id=?", (image_id,)
                 ).fetchone()
                 if row is None:
-                    raise HTTPException(404, "image not found")
+                    raise HTTPException(404, "图片不存在")
                 if row["source"] != "local":
-                    raise HTTPException(400, "only local images can be deleted")
+                    raise HTTPException(400, "只能删除本地图片。")
                 target = _safe_db_file(settings.images_dir, str(row["rel_path"]))
                 quarantined = target.with_name(f".{target.name}.{secrets.token_hex(8)}.deleting")
                 os.replace(target, quarantined)
@@ -1131,7 +1132,7 @@ def create_admin_router(settings: Any) -> APIRouter:
         with db.get_conn(settings.database_path) as conn:
             cursor = conn.execute("UPDATE images SET enabled=? WHERE id=? AND source='local'", (enabled, image_id))
             if not cursor.rowcount:
-                raise HTTPException(404, "local image not found")
+                raise HTTPException(404, "本地图片不存在")
         scan(request)
         return _redirect(f"{admin_path}/images?source=local", "本地图片状态已更新")
 
@@ -1142,7 +1143,7 @@ def create_admin_router(settings: Any) -> APIRouter:
         enabled = 1 if str(form.get("enabled", "0")) == "1" else 0
         with db.get_conn(settings.database_path) as conn:
             if not conn.execute("UPDATE webdav_objects SET enabled=? WHERE href=?", (enabled, href)).rowcount:
-                raise HTTPException(404, "WebDAV object not found")
+                raise HTTPException(404, "WebDAV 图片不存在")
         return _redirect(f"{admin_path}/images?source=webdav", "WebDAV 状态已更新")
 
     async def update_webdav_tag(request: Request, force_remove: bool = False):
@@ -1199,11 +1200,11 @@ def create_admin_router(settings: Any) -> APIRouter:
         sid, _session, form = await write_auth(request)
         uploaded = form.get("archive")
         if not hasattr(uploaded, "read"):
-            raise HTTPException(400, "archive required")
+            raise HTTPException(400, "请选择一个归档文件。")
         filename = str(getattr(uploaded, "filename", "")).lower()
         suffix = ".tar.gz" if filename.endswith(".tar.gz") else ".tgz" if filename.endswith(".tgz") else ".zip" if filename.endswith(".zip") else ""
         if not suffix:
-            raise HTTPException(400, "supported archive types: ZIP, TAR.GZ, TGZ")
+            raise HTTPException(400, "仅支持 ZIP、TAR.GZ、TGZ 归档。")
         try:
             selected_slugs = _selected_tag_slugs(form)
             selected_default_tag = str(form.get("default_tag", "")).strip()
@@ -1213,7 +1214,7 @@ def create_admin_router(settings: Any) -> APIRouter:
             with db.get_conn(settings.database_path) as conn:
                 _require_existing_tags(conn, selected_slugs)
         except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
+            raise HTTPException(400, "所选标签无效或已停用，请重新选择。") from exc
         limits = _limits(settings)
         upload_tmp_dir.mkdir(parents=True, exist_ok=True)
         token = secrets.token_urlsafe(32)
@@ -1228,13 +1229,13 @@ def create_admin_router(settings: Any) -> APIRouter:
                         break
                     archive_size += len(chunk)
                     if archive_size > limits.max_archive_bytes:
-                        raise HTTPException(413, "archive too large")
+                        raise HTTPException(413, "归档超过网页上传上限，请减小文件或使用命令行导入。")
                     archive_hash.update(chunk)
                     handle.write(chunk)
                 handle.flush()
                 os.fsync(handle.fileno())
             if archive_size == 0:
-                raise HTTPException(400, "archive is empty")
+                raise HTTPException(400, "归档为空，请选择包含图片的归档。")
             summary = importer.import_archive(path, settings.images_dir, dry_run=True, square_policy=settings.square_policy, limits=limits)
             entries = _archive_entries(path, limits)
             previews[token] = _Preview(
@@ -1253,7 +1254,7 @@ def create_admin_router(settings: Any) -> APIRouter:
             raise
         except (importer.ImportErrorBase, ValueError, zipfile.BadZipFile, tarfile.TarError, OSError) as exc:
             path.unlink(missing_ok=True)
-            raise HTTPException(400, str(exc)) from exc
+            raise HTTPException(400, "无法读取归档，请检查格式和内容后重试。") from exc
         hints = sorted({hint for _digest, hint in entries if hint})
         choices = "".join(
             f'<label><input type="checkbox" name="map_dirs" value="{_escape(hint)}" checked> 映射目录 {_escape(hint)}</label><br>'
@@ -1277,8 +1278,23 @@ def create_admin_router(settings: Any) -> APIRouter:
         )
         if not tag_choices:
             tag_choices = f'<p class="muted">没有其他可选标签，可先到 <a href="{admin_path}/tags">标签工作台</a> 创建。</p>'
+        summary_items = (
+            ("归档内容", summary.members),
+            ("检查图片", summary.files_examined),
+            ("可导入", summary.imported),
+            ("重复", summary.duplicates),
+            ("跳过", summary.skipped),
+            ("横屏", summary.desktop),
+            ("竖屏", summary.mobile),
+            ("方形", summary.square),
+        )
+        summary_html = "".join(
+            f"<dt>{_escape(label)}</dt><dd>{int(value)}</dd>"
+            for label, value in summary_items
+        )
         body = (
-            f"<pre>{_escape(summary.to_dict())}</pre>"
+            '<p class="muted">请检查导入内容和标签；确认前仍可调整本次全部图片的标签。</p>'
+            f'<section aria-labelledby="archive-summary-title"><h2 id="archive-summary-title">导入摘要</h2><dl class="detail-grid">{summary_html}</dl></section>'
             f'<form method="post" action="{admin_path}/archives/confirm">{hidden(_session.csrf)}'
             f'<input type="hidden" name="token" value="{_escape(token)}">'
             f'<input type="hidden" name="map_dirs_present" value="1">'
@@ -1294,12 +1310,12 @@ def create_admin_router(settings: Any) -> APIRouter:
         token = str(form.get("token", ""))
         pending = previews.get(token)
         if pending is None:
-            raise HTTPException(404, "preview not found or expired")
+            raise HTTPException(404, "预览已失效，请重新上传归档。")
         if pending.expires_at <= time.time():
             previews.pop(token, None); pending.archive_path.unlink(missing_ok=True)
-            raise HTTPException(410, "preview expired")
+            raise HTTPException(410, "预览已失效，请重新上传归档。")
         if not hmac.compare_digest(pending.session_id, sid):
-            raise HTTPException(403, "preview belongs to another session")
+            raise HTTPException(403, "无法确认此预览，请重新上传归档。")
         try:
             current_size = pending.archive_path.stat().st_size
             current_digest = hashlib.sha256()
@@ -1310,11 +1326,11 @@ def create_admin_router(settings: Any) -> APIRouter:
         except OSError as exc:
             previews.pop(token, None)
             pending.archive_path.unlink(missing_ok=True)
-            raise HTTPException(400, "preview archive unavailable") from exc
+            raise HTTPException(400, "预览文件不可用，请重新上传归档。") from exc
         if current_size != pending.archive_size or not hmac.compare_digest(current_hash, pending.archive_sha256):
             previews.pop(token, None)
             pending.archive_path.unlink(missing_ok=True)
-            raise HTTPException(400, "preview archive changed")
+            raise HTTPException(400, "预览内容已变化，请重新上传归档。")
         try:
             if "default_tag" not in form and "tags_present" not in form:
                 form = FormData([
@@ -1327,20 +1343,20 @@ def create_admin_router(settings: Any) -> APIRouter:
             if str(form.get("map_dirs_present", "")) == "1":
                 selected_hints = {db.validate_slug(str(value)) for value in form.getlist("map_dirs")}
                 if not selected_hints <= available_hints:
-                    raise ValueError("directory tag is not part of preview")
+                    raise ValueError("目录标签无效，请重新预览归档。")
             else:
                 selected_hints = available_hints
         except ValueError as exc:
             previews.pop(token, None)
             pending.archive_path.unlink(missing_ok=True)
-            raise HTTPException(400, str(exc)) from exc
+            raise HTTPException(400, "归档选项无效，请重新上传并预览。") from exc
         with db.get_conn(settings.database_path) as conn:
             try:
                 selected_tag_ids = list(_require_existing_tags(conn, selected_slugs).values())
             except ValueError as exc:
                 previews.pop(token, None)
                 pending.archive_path.unlink(missing_ok=True)
-                raise HTTPException(400, str(exc)) from exc
+                raise HTTPException(400, "所选标签无效或已停用，请重新上传归档。") from exc
         existing_files = {path.resolve() for path in Path(settings.images_dir).rglob("*") if path.is_file()}
         try:
             summary = importer.import_archive(pending.archive_path, settings.images_dir, dry_run=False, square_policy=settings.square_policy, limits=_limits(settings))
