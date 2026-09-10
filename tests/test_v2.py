@@ -34,7 +34,7 @@ def test_v1_schema_migrates_idempotently_and_keeps_untagged(tmp_path: Path) -> N
         """)
     for _ in range(2):
         with db.get_conn(database) as conn:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
     with db.get_conn(database) as conn:
         row = conn.execute("SELECT enabled,source,content_hash FROM images").fetchone()
         assert (row["enabled"], row["source"], row["content_hash"]) == (1, "local", None)

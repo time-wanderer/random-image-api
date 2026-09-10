@@ -1,10 +1,13 @@
+> 源码开发说明：V3.0.0 的持久化可恢复分片上传已在本地工作区实现，但本任务未提交、推送或发布。计划镜像标签为 `v3`；已有 `v1`、`v2` 均继续保留，Docker Hub `v2` 当前仍是 V2.2.4。
+
 # Random Image API：Docker Hub 与 V2.2 部署说明
 
 Random Image API V2 是 V1 的向后兼容扩展，增加 tags、多对多主题、主题随机接口和安全管理 UI，同时保留 V1 的 `/random`、本地/Hybrid、WebDAV 默认 90% 远程优先、缓存、importer 和 Backup / Restore。V2.2 继续兼容 V2.0 的 API 与数据库，重点改善管理网页、图片预览、目录整理和标签编辑体验。
 
 ## 发布状态（请先阅读）
 
-- **当前源码与发布镜像版本**：V2.2.4，已完成远程隔离构建、93 项 Python 测试、运行态验收与发布后 Registry 回读
+- **当前工作区源码版本**：V3.0.0（未发布）
+- **当前发布镜像版本**：V2.2.4，历史验收与 Registry 回读已完成
 - **当前发布镜像**：`qinlingmonkey/random-image-api:v2`
 - **V2.2.4 验收状态**：完整测试为 `93 passed`，Node 上传校验测试通过；容器 `healthy`、版本 `2.2.4`、PID 1 UID `1000`，管理总览与归档预览的用户文案、结构化摘要、标签提示和内部信息隔离均通过 HTTP/HTML 合同检查
 - **平台**：`linux/amd64`
@@ -214,9 +217,9 @@ V2 管理 UI 推荐使用两阶段流程：
 1. **preview**：上传归档，先完整校验路径穿越、成员数、单文件/总大小、压缩比和真实图片格式，执行 dry-run，不写入永久图库；上传前可选择多个已有启用标签，空表示不加标签；
 2. **confirm**：核对统计、上传前标签及归档成员父目录产生的目录标签映射后，才正式导入；预览页仍可复核修改。上传前选择的标签应用于本次所有图片。
 
-待确认归档保存在服务端 `UPLOAD_TMP_DIR`，preview 索引只在进程内存；TTL、登出或进程重启会清理或使其失效。浏览器或 Cloudflare 上传链路可能另用本机或边缘临时存储，这些均不是永久图库。
+待确认归档保存在服务端 `UPLOAD_TMP_DIR`，preview 索引只在进程内存；TTL、登出或进程重启会清理或使其失效。浏览器或上游网关可能另用本机或边缘临时存储，这些均不是永久图库。
 
-默认网页归档上限仍为 512 MiB，没有提高。若经过 Cloudflare，网页实际上限取应用限制、计划限制和站点 **Network → Maximum Upload Size** 设置中的较小值。Cloudflare 官方当前列出的计划边界为 Free/Pro 100 MB、Business 200 MB、Enterprise 默认 500 MB（Enterprise 可在 Network 页面自助调整至 5 GB）；超过或把站点设置调低到请求大小以下均会返回 `413`。2.56 GiB 不适合网页路径，应使用 CLI。
+普通 multipart 网页归档上限默认仍为 512 MiB。若经过反向代理或托管网关，实际上限取应用限制与链路中所有上游请求体限制的最小值；大归档优先使用可恢复分片上传或 CLI。
 
 ## 6. WebDAV Hybrid 与第一层主题
 
@@ -273,6 +276,7 @@ openssl rand -hex 32
 ## 8. V1→V2 原地升级
 
 ```bash
+docker compose stop api
 ./scripts/backup.sh
 docker compose down
 # 把 Compose 镜像切换为 qinlingmonkey/random-image-api:v2，
@@ -287,6 +291,7 @@ V2 启动时幂等迁移 V1 SQLite：新增 tags、多对多关系和 V2 字段�
 ## 9. Backup / Restore 与 VPS 迁移
 
 ```bash
+docker compose stop api
 ./scripts/backup.sh
 docker compose down
 RESTORE_CONFIRM=YES ./scripts/restore.sh /path/to/backup.tar.gz
@@ -300,9 +305,16 @@ docker compose up -d
 - `/random` 为 `404`：确认图库有可用图片；主题请求还需确认标签存在、启用并已关联候选。
 - `/random` 为 `503`：检查数据库、WebDAV 连通性、允许主机、凭据、缓存和本地降级候选。
 - 管理 UI 无法登录：确认 `ADMIN_TOKEN`、会话密钥、入口路径和反向代理设置。
-- 归档上传返回 `413`：比较 `ADMIN_MAX_ARCHIVE_BYTES`、Cloudflare 计划上限及 Network → Maximum Upload Size，网页有效值取其中最小者；大归档改用 CLI。
+- 归档上传返回 `413`：比较应用限制与所有上游请求体限制，网页有效值取其中最小者；大归档使用可恢复分片上传或 CLI。
 - `.env` 修改未生效：执行 `docker compose up -d --force-recreate`。
 - Permission denied：确保挂载目录可由镜像内非 Root 用户写入。
 - WebDAV 主题未出现：主题必须是方向根目录下第一层、且名称可转换为合法 slug；然后重新同步。
 
 完整源码、V1 快照和迁移文档见：`https://github.com/time-wanderer/random-image-api`。
+
+
+## 源码 V3.0.0：网页大归档分片上传
+
+未发布 V3 源码管理页保留普通 multipart 小归档上传，并为大归档提供服务端 capabilities、顺序 offset、断点恢复、默认 8 MiB 与 `413` 自适应降档、SQLite 任务持久化、取消操作和单 `upload.bin` 临时存储。`PATCH` 在读取 body 前执行同任务与进程级 in-flight admission，获准后直接逐块写入。进度只采用服务端确认 offset；刷新后需在同一浏览器重新选择同一文件。任务绑定独立签名上传所有者 Cookie，临近过期时保持 owner 身份滚动续签。完成上传后继续使用既有 importer dry-run、结构化预览和确认导入，确认成功后立即清理任务文件。
+
+上传与普通 multipart staging 按 `UPLOAD_TMP_DIR` 所在文件系统检查容量，确认导入按 `IMAGES_DIR` 所在文件系统检查，并保留其他 receiving 任务尚承诺的字节；跨文件系统 multipart 复制会先检查 spool 与受控副本短时并存的峰值。过期任务由启动、管理请求和轻量单实例周期任务清理。标准 Backup 不复制临时 `upload.bin`，Restore 会清空快照内 `upload_tasks` 并删除默认分片临时目录。默认参数及完整恢复边界见仓库 `docs/CHUNKED_UPLOAD.md`。计划发布为 `v3`，不会覆盖或删除 `v1`、`v2`；当前 Docker Hub `v2` 仍为 V2.2.4，以上 V3 功能尚未发布到任何现有镜像。

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+import time
 
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from app import db
 from app.config import Settings
 from app.main import create_app
 from tests.conftest import make_image
@@ -37,7 +39,7 @@ def test_health(client: TestClient) -> None:
     response = client.get("/health")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["version"] == "2.2.4"
+    assert payload["version"] == "3.0.0"
     assert payload["status"] == "ok"
     assert payload["database"] == "ok"
     assert payload["images"]["total"] == 5
@@ -218,6 +220,45 @@ def test_admin_rescan_requires_token(populated_settings: Settings) -> None:
         assert allowed.json()["status"] == "ok"
 
 
+def test_chunked_ttl_cleanup_runs_without_admin_requests(settings: Settings) -> None:
+    settings.scan_on_startup = False
+    settings.admin_chunked_upload_ttl_seconds = 1
+    settings.admin_chunked_cleanup_interval_seconds = 0.05
+    settings.admin_chunked_min_free_bytes = 1
+    app = create_app(settings)
+
+    with TestClient(app):
+        row = app.state.upload_store.create(
+            "owner",
+            "archive.zip",
+            ".zip",
+            4,
+        )
+        task_id = str(row["id"])
+        task_dir = app.state.upload_store.root / task_id
+        with db.get_conn(settings.database_path) as conn:
+            conn.execute(
+                "UPDATE upload_tasks SET expires_at=? WHERE id=?",
+                (time.time() + 0.1, task_id),
+            )
+
+        deadline = time.monotonic() + 2
+        exists = True
+        while time.monotonic() < deadline:
+            with db.get_conn(settings.database_path) as conn:
+                exists = conn.execute(
+                    "SELECT 1 FROM upload_tasks WHERE id=?",
+                    (task_id,),
+                ).fetchone() is not None
+            if not exists:
+                break
+            time.sleep(0.02)
+        assert exists is False
+        assert not task_dir.exists()
+
+    assert not app.state.scanner_thread.is_alive()
+
+
 def test_dockerfile_makes_entrypoint_executable() -> None:
     """Archive/worktree modes must not make the production ENTRYPOINT unusable."""
     dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text(encoding="utf-8")
@@ -225,8 +266,10 @@ def test_dockerfile_makes_entrypoint_executable() -> None:
     assert 'ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]' in dockerfile
 
 
-def test_restore_recreates_all_orientation_directories() -> None:
-    restore = (Path(__file__).resolve().parents[1] / "scripts" / "restore.sh").read_text(encoding="utf-8")
-    assert '"${ROOT_DIR}/data/images/desktop"' in restore
-    assert '"${ROOT_DIR}/data/images/mobile"' in restore
-    assert '"${ROOT_DIR}/data/images/square"' in restore
+def test_backup_restore_invalidates_incomplete_chunked_uploads() -> None:
+    root = Path(__file__).resolve().parents[1]
+    backup = (root / "scripts" / "backup.sh").read_text(encoding="utf-8")
+    restore = (root / "scripts" / "restore.sh").read_text(encoding="utf-8")
+    assert "temporary chunk upload files" in backup
+    assert 'DELETE FROM upload_tasks' in restore
+    assert 'data/tmp/admin/chunked' in restore

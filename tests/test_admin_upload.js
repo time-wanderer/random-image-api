@@ -14,14 +14,31 @@ assert.equal(upload.validateArchive([file('large.tgz', 'application/gzip', limit
 const oversizedImage = upload.validateImages([file('large.webp', 'image/webp', limit + 1)], limit).message;
 const oversizedArchive = upload.validateArchive([file('large.zip', 'application/zip', limit + 1)], limit).message;
 assert.match(oversizedImage, /超过网页单文件上限 10\.00 MiB/);
-assert.match(oversizedArchive, /超过网页上限 10\.00 MiB/);
+assert.match(oversizedArchive, /超过应用总上传上限 10\.00 MiB/);
 assert.match(oversizedImage, /请减小文件或使用命令行导入/);
 assert.match(oversizedArchive, /请减小文件或使用命令行导入/);
 const source = require('node:fs').readFileSync(require.resolve('../app/admin_upload.js'), 'utf8');
 for (const internal of ['UPLOAD_TMP_DIR', '进程内存', 'TTL', '浏览器', '边缘临时存储', 'Cloudflare', '2.56 GiB', '代理限制', 'CLI']) {
   assert.equal(source.includes(internal), false, `JS 不应包含内部词句：${internal}`);
 }
-assert.match(source, /可能超过上传链路限制，请减小文件或使用命令行导入/);
+assert.match(source, /分片上传失败，请检查连接后重试/);
 assert.match(source, /正在安全校验并生成预览/);
+const MiB = 1024 * 1024;
+assert.equal(upload.negotiatedChunk(8*MiB, 1*MiB, 16*MiB), 8*MiB);
+assert.equal(upload.lowerChunk(8*MiB, 1*MiB), 4*MiB);
+assert.equal(upload.lowerChunk(4*MiB, 1*MiB), 2*MiB);
+assert.equal(upload.lowerChunk(2*MiB, 1*MiB), 1*MiB);
+assert.equal(upload.lowerChunk(1*MiB, 1*MiB), 0);
+assert.equal(upload.progressText(4*MiB, 8*MiB), '上传 50%（4.00 / 8.00 MiB）');
+assert.match(source, /file\.slice\(offset,end\)/);
+assert.match(source, /response\.headers\.get\('Upload-Offset'\)/);
+assert.equal(source.includes('ev.loaded/ev.total'), false);
 assert.equal(source.includes('服务器正在'), false);
+assert.match(source, /AbortController/);
+assert.match(source, /重新选择同一文件/);
+assert.match(source, /method:'DELETE'/);
+assert.match(source, /throw new Error\(await errorFrom\(response,'取消请求未完成/);
+assert.match(source, /if\(response\.status===401\)/);
+assert.match(source, /response\.status===204\|\|response\.status===404\|\|response\.status===410/);
+assert.match(source, /base\+'\/capabilities'/);
 console.log('admin_upload.js validation tests passed');

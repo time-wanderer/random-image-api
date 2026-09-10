@@ -1,3 +1,3 @@
 """Random Image API application package."""
 
-__version__ = "2.2.4"
+__version__ = "3.0.0"

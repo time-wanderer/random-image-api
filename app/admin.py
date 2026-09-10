@@ -4,9 +4,9 @@ Integration::
 
     app.include_router(create_admin_router(settings))
 
-The router intentionally keeps sessions, login throttles and pending archive
-previews in process memory.  Restarting the process logs administrators out and
-removes stale previews on the next router construction/request.
+Sessions, login throttles and ordinary multipart previews remain in process
+memory. Chunked archive task state and preview metadata are persisted in SQLite
+so an administrator can resume them after restarting and logging in again.
 """
 from __future__ import annotations
 
@@ -14,11 +14,18 @@ import hashlib
 import hmac
 import html
 import io
+import errno
+import json
+import logging
 import os
 import re
 import secrets
+import shutil
 import sqlite3
+import stat
 import tarfile
+import tempfile
+import threading
 import time
 import zipfile
 from dataclasses import dataclass
@@ -27,13 +34,15 @@ from typing import Any
 from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.routing import APIRoute
 from PIL import Image, ImageOps, UnidentifiedImageError
 from starlette.datastructures import FormData
 from starlette.formparsers import FormParser, MultiPartException, MultiPartParser
+from starlette.concurrency import run_in_threadpool
 
 from app import db, importer
+from app.chunked_upload import UploadError, UploadStore
 from app.catalog import classify_orientation
 
 _FORMAT_EXTENSIONS = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
@@ -41,6 +50,85 @@ _CONTENT_TYPES = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"
 _SLUG_PART = re.compile(r"[^a-z0-9]+")
 _UNTAGGED_FILTER = "__untagged__"
 _UPLOAD_JS = Path(__file__).with_name("admin_upload.js").read_text(encoding="utf-8")
+logger = logging.getLogger("random_image_api.admin")
+
+
+def _stage_spooled_upload(
+    uploaded: Any,
+    destination: Path,
+    *,
+    limit: int,
+    min_free: int,
+    reserved_bytes: int = 0,
+) -> tuple[int, str]:
+    """Move a server spool when possible, otherwise copy it once with peak checks."""
+    spool = getattr(uploaded, "file", None)
+    if not isinstance(spool, tempfile.SpooledTemporaryFile):
+        raise HTTPException(400, "上传临时文件不可用，请重新选择归档。")
+    spool.rollover()
+    spool.seek(0, os.SEEK_END)
+    size = spool.tell()
+    spool.seek(0)
+    if size <= 0:
+        raise HTTPException(400, "归档为空，请选择包含图片的归档。")
+    if size > limit:
+        raise HTTPException(413, "归档超过普通上传上限，请使用分片上传或减小文件。")
+
+    source: Path | None = None
+    source_name = getattr(getattr(spool, "_file", None), "name", None)
+    if isinstance(source_name, (str, os.PathLike)):
+        candidate = Path(source_name)
+        try:
+            source_stat = candidate.lstat()
+            if stat.S_ISREG(source_stat.st_mode) and not candidate.is_symlink():
+                source = candidate
+        except OSError:
+            source = None
+
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    free = shutil.disk_usage(destination.parent).free
+    can_move = False
+    if source is not None:
+        try:
+            can_move = source.stat().st_dev == destination.parent.stat().st_dev
+        except OSError:
+            can_move = False
+    required_extra = 0 if can_move else size
+    if free - required_extra - reserved_bytes < min_free:
+        raise HTTPException(507, "上传临时空间不足，请清理空间后重试。")
+
+    digest = hashlib.sha256()
+    try:
+        if can_move and source is not None:
+            for chunk in iter(lambda: spool.read(1024 * 1024), b""):
+                digest.update(chunk)
+            spool.seek(0)
+            os.replace(source, destination)
+            os.chmod(destination, 0o600)
+        else:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(destination, flags, 0o600)
+            with os.fdopen(fd, "wb") as output:
+                os.fchmod(output.fileno(), 0o600)
+                copied = 0
+                for chunk in iter(lambda: spool.read(1024 * 1024), b""):
+                    copied += len(chunk)
+                    if copied > size or output.write(chunk) != len(chunk):
+                        raise OSError(errno.ENOSPC, "short write")
+                    digest.update(chunk)
+                if copied != size:
+                    raise OSError(errno.EIO, "spool size changed")
+                output.flush()
+                os.fsync(output.fileno())
+        return size, digest.hexdigest()
+    except HTTPException:
+        destination.unlink(missing_ok=True)
+        raise
+    except OSError as exc:
+        destination.unlink(missing_ok=True)
+        if exc.errno in {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}:
+            raise HTTPException(507, "上传临时空间不足，请清理空间后重试。") from exc
+        raise HTTPException(400, "无法保存上传归档，请重新选择文件后重试。") from exc
 
 
 class _ClosingFormRoute(APIRoute):
@@ -51,7 +139,20 @@ class _ClosingFormRoute(APIRoute):
 
         async def closing_handler(request: Request):
             try:
-                return await handler(request)
+                response = await handler(request)
+                renewal = getattr(request.state, "upload_owner_renewal", None)
+                if renewal is not None:
+                    name, value, max_age, secure, path = renewal
+                    response.set_cookie(
+                        name,
+                        value,
+                        max_age=max_age,
+                        httponly=True,
+                        secure=secure,
+                        samesite="strict",
+                        path=path,
+                    )
+                return response
             finally:
                 await request.close()
 
@@ -75,6 +176,8 @@ class _Preview:
     entries: list[tuple[str, str]]  # (sha256, directory-derived slug)
     selected_default_tag: str
     selected_tags: tuple[str, ...]
+    persistent: bool = False
+    owner_key: str = ""
 
 
 def _escape(value: object) -> str:
@@ -240,7 +343,7 @@ function refreshBatchSelection(){var count=document.querySelectorAll('[data-batc
 document.addEventListener('click',function(e){var layer=e.target.closest('.lightbox,.drawer');if(layer&&e.target===layer){closeLayer(layer);return;}var batch=e.target.closest('[data-batch-select]');if(batch){e.preventDefault();var checked=batch.dataset.batchSelect==='all';document.querySelectorAll('[data-batch-image]').forEach(function(x){x.checked=checked;});refreshBatchSelection();return;}var c=e.target.closest('[data-close-layer]');if(c){e.preventDefault();closeLayer(document.getElementById(c.dataset.closeLayer));return;}var l=e.target.closest('[data-lightbox-src]');if(l){e.preventDefault();var b=document.getElementById('image-lightbox');b.querySelector('img').src=l.dataset.lightboxSrc;b.querySelector('img').alt=l.dataset.lightboxAlt||'';b._opener=l;b.hidden=false;document.body.style.overflow='hidden';return;}var d=e.target.closest('[data-detail-url]');if(d){e.preventDefault();var x=document.getElementById('image-detail-drawer');x.querySelector('.drawer-content').innerHTML='<p class="muted">正在加载…</p>';x._opener=d;x.hidden=false;document.body.style.overflow='hidden';fetch(d.dataset.detailUrl,{credentials:'same-origin'}).then(function(r){if(r.redirected&&new URL(r.url,window.location.href).pathname.endsWith('/login')){window.location.assign(r.url);return null;}if(!r.ok)throw Error();return r.text();}).then(function(t){if(t!==null)x.querySelector('.drawer-content').innerHTML=t;}).catch(function(){x.querySelector('.drawer-content').innerHTML='<p class="alert error" role="alert">详情加载失败，请重试。</p>';});}});
 document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeLayer(document.getElementById('image-lightbox'));closeLayer(document.getElementById('image-detail-drawer'));}});
 var initialBatch=document.querySelector('[data-batch-toolbar]');if(initialBatch)initialBatch.hidden=true;var z=document.querySelector('[data-drop-zone]'),i=document.querySelector('[data-drop-input]');if(z&&i){['dragenter','dragover'].forEach(function(n){z.addEventListener(n,function(e){e.preventDefault();z.classList.add('is-dragging');});});['dragleave','drop'].forEach(function(n){z.addEventListener(n,function(e){e.preventDefault();z.classList.remove('is-dragging');});});z.addEventListener('drop',function(e){if(e.dataTransfer.files.length){i.files=e.dataTransfer.files;i.dispatchEvent(new Event('change',{bubbles:true}));}});}
-});})();</script>""" + f"<script>{_UPLOAD_JS}</script>"
+});})();</script>"""
     return HTMLResponse("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"+f"{token}<title>{_escape(title)}</title>{style}</head><body><header><div class=\"appbar\"><div class=\"brand\"><span class=\"brand-mark\" aria-hidden=\"true\">R</span><div><h1>{_escape(title)}</h1><span class=\"version\">Random Image API · 管理端 · V2</span></div></div><div class=\"user-actions\">{nav}</div></div></header><main>{body}</main></body></html>")
 
 
@@ -297,10 +400,14 @@ def _limits(settings: Any) -> importer.ImportLimits:
     )
 
 
-def _archive_entries(path: Path, limits: importer.ImportLimits) -> list[tuple[str, str]]:
+def _archive_entries(
+    path: Path,
+    limits: importer.ImportLimits,
+    archive_suffix: str | None = None,
+) -> list[tuple[str, str]]:
     """Return image hashes/tag hints after importer-owned archive validation."""
     archive_size = path.stat().st_size
-    archive, kind = importer._open_archive(path)
+    archive, kind = importer._open_archive(path, archive_suffix)
     entries: list[tuple[str, str]] = []
     with archive:
         members = (
@@ -401,7 +508,7 @@ def _like_pattern(value: str) -> str:
     return "%" + value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
-def create_admin_router(settings: Any) -> APIRouter:
+def create_admin_router(settings: Any, upload_store: UploadStore | None = None) -> APIRouter:
     """Build a self-contained administration router.
 
     Optional settings are read with ``getattr`` so this module works with the
@@ -416,15 +523,24 @@ def create_admin_router(settings: Any) -> APIRouter:
     login_window = max(1, int(getattr(settings, "admin_login_window_seconds", 60)))
     login_attempts = max(1, int(getattr(settings, "admin_login_max_attempts", 5)))
     upload_max = max(1, int(getattr(settings, "admin_max_upload_bytes", 25 * 1024 * 1024)))
-    request_max = max(
-        upload_max,
-        int(getattr(settings, "admin_max_archive_bytes", importer.ImportLimits().max_archive_bytes)),
-    ) + 1024 * 1024
+    multipart_archive_max = max(1, int(getattr(
+        settings, "admin_multipart_archive_max_bytes",
+        min(int(getattr(settings, "admin_max_archive_bytes", importer.ImportLimits().max_archive_bytes)), 512 * 1024 * 1024),
+    )))
+    request_max = max(upload_max, multipart_archive_max) + 1024 * 1024
     upload_tmp_dir = Path(getattr(settings, "upload_tmp_dir", Path(settings.data_dir) / "tmp" / "admin"))
     configured_secret = str(getattr(settings, "admin_session_secret", ""))
     signing_key = configured_secret.encode()
+    upload_store = upload_store or UploadStore(settings)
+    owner_cookie_name = f"{cookie_name}_upload_owner"
+    owner_ttl = max(
+        int(getattr(settings, "admin_upload_owner_ttl_seconds", 30 * 86_400)),
+        int(getattr(settings, "admin_chunked_upload_ttl_seconds", 86_400)),
+    )
     sessions: dict[str, _Session] = {}
     previews: dict[str, _Preview] = {}
+    previews_lock = threading.RLock()
+    confirming_tokens: set[str] = set()
     failures: dict[str, list[float]] = {}
     router = APIRouter(
         prefix=admin_path,
@@ -434,25 +550,87 @@ def create_admin_router(settings: Any) -> APIRouter:
 
     def clean(now: float | None = None) -> None:
         current = time.time() if now is None else now
+        upload_store.clean(current)
         for sid in [key for key, value in sessions.items() if value.expires_at <= current]:
             sessions.pop(sid, None)
             for token in [key for key, value in previews.items() if value.session_id == sid]:
                 pending = previews.pop(token)
-                pending.archive_path.unlink(missing_ok=True)
+                if not pending.persistent:
+                    pending.archive_path.unlink(missing_ok=True)
         for token in [key for key, value in previews.items() if value.expires_at <= current]:
             pending = previews.pop(token)
+            if pending.persistent:
+                try:
+                    upload_store.delete(token, pending.owner_key, missing_ok=True)
+                except UploadError:
+                    pass
+            else:
+                pending.archive_path.unlink(missing_ok=True)
+
+    def discard_preview(token: str, pending: _Preview) -> None:
+        previews.pop(token, None)
+        if pending.persistent:
+            try:
+                upload_store.delete(token, pending.owner_key, missing_ok=True)
+            except UploadError:
+                pass
+        else:
             pending.archive_path.unlink(missing_ok=True)
+
+    def discard_failed_preview(token: str, pending: _Preview) -> None:
+        # Persistent previews remain available for a corrected/retried confirm.
+        if not pending.persistent:
+            discard_preview(token, pending)
 
     def sign(sid: str, expires: int) -> str:
         payload = f"{sid}.{expires}"
         signature = hmac.new(signing_key, payload.encode(), hashlib.sha256).hexdigest()
         return f"{payload}.{signature}"
 
-    def authenticate(request: Request) -> tuple[str, _Session]:
+    def sign_owner(owner_id: str, expires: int) -> str:
+        payload = f"upload-owner.{owner_id}.{expires}"
+        signature = hmac.new(signing_key, payload.encode(), hashlib.sha256).hexdigest()
+        return f"{owner_id}.{expires}.{signature}"
+
+    def parse_owner(raw: str) -> tuple[str, int] | None:
+        try:
+            owner_id, expiry_text, supplied = raw.split(".", 2)
+            expiry = int(expiry_text)
+        except (ValueError, TypeError):
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", owner_id) or expiry <= int(time.time()):
+            return None
+        expected = hmac.new(
+            signing_key, f"upload-owner.{owner_id}.{expiry}".encode(), hashlib.sha256
+        ).hexdigest()
+        return (owner_id, expiry) if hmac.compare_digest(supplied, expected) else None
+
+    def upload_owner(request: Request) -> str:
+        parsed = parse_owner(request.cookies.get(owner_cookie_name, ""))
+        if parsed is None:
+            raise HTTPException(401, "请重新登录后继续上传。")
+        owner_id, expiry = parsed
+        now = int(time.time())
+        if expiry - now <= max(60, owner_ttl // 2):
+            renewed_expiry = now + owner_ttl
+            forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+            secure = cookie_secure or request.url.scheme == "https" or (
+                bool(getattr(settings, "trusted_proxy_headers", True)) and forwarded_proto == "https"
+            )
+            request.state.upload_owner_renewal = (
+                owner_cookie_name,
+                sign_owner(owner_id, renewed_expiry),
+                owner_ttl,
+                secure,
+                admin_path,
+            )
+        return hmac.new(signing_key, f"upload-task:{owner_id}".encode(), hashlib.sha256).hexdigest()
+
+    def authenticate(request: Request, *, api: bool = False) -> tuple[str, _Session]:
         clean()
 
         def authentication_failed() -> None:
-            if request.method == "GET":
+            if request.method == "GET" and not api:
                 raise HTTPException(
                     status_code=303,
                     detail="请先登录管理端",
@@ -537,6 +715,48 @@ def create_admin_router(settings: Any) -> APIRouter:
             raise HTTPException(403, "页面已失效，请刷新后重试。")
         return sid, session, form
 
+    def upload_api_auth(request: Request, *, write: bool = False) -> tuple[str, _Session, str]:
+        try:
+            sid, session = authenticate(request, api=True)
+            owner_key = upload_owner(request)
+        except HTTPException as exc:
+            raise UploadError(401, "authentication_required", "请重新登录后继续上传。") from exc
+        if write:
+            supplied = request.headers.get("x-csrf-token", "")
+            if not hmac.compare_digest(supplied, session.csrf):
+                raise UploadError(403, "csrf_failed", "页面已失效，请刷新后重试。")
+        return sid, session, owner_key
+
+    def upload_error(exc: UploadError) -> JSONResponse:
+        headers = {"Cache-Control": "no-store"}
+        if exc.offset is not None:
+            headers["Upload-Offset"] = str(exc.offset)
+        return JSONResponse(
+            status_code=exc.status,
+            content={"error": {"code": exc.code, "message": exc.message}},
+            headers=headers,
+        )
+
+    def upload_headers(row: Any) -> dict[str, str]:
+        return {
+            "Cache-Control": "no-store",
+            "Upload-Offset": str(int(row["committed_offset"])),
+            "Upload-Length": str(int(row["expected_size"])),
+            "Upload-State": str(row["state"]),
+            "Upload-Chunk-Recommended": str(upload_store.recommended),
+            "Upload-Chunk-Min": str(upload_store.minimum),
+            "Upload-Chunk-Max": str(upload_store.maximum),
+            "Upload-Fingerprint": str(row["client_fingerprint"] or ""),
+        }
+
+    @router.get("/admin-upload.js", include_in_schema=False)
+    def admin_upload_script() -> Response:
+        return Response(
+            _UPLOAD_JS,
+            media_type="text/javascript; charset=utf-8",
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+
     def scan(request: Request) -> None:
         catalog = getattr(request.app.state, "catalog", None)
         if catalog is None:
@@ -566,7 +786,7 @@ def create_admin_router(settings: Any) -> APIRouter:
         )
         logout = ""
         if csrf is not None:
-            logout = f'<form method="post" action="{_escape(admin_path)}/logout" onsubmit="return confirm(\'确定退出管理端？\')">{hidden(csrf)}<button class="secondary">退出</button></form>'
+            logout = (f'<form method="post" action="{_escape(admin_path)}/logout">{hidden(csrf)}<button class="secondary">退出（保留上传）</button></form>' f'<form method="post" action="{_escape(admin_path)}/logout-and-clear" onsubmit="return confirm(\'确定退出并清除所有未完成上传？\')">{hidden(csrf)}<button class="danger">退出并清除上传</button></form>')
         return f'<nav class="main-nav" aria-label="主导航">{items}</nav>{logout}'
 
     def tag_inputs(rows: list[Any], *, adjustable_on_confirm: bool = False) -> str:
@@ -610,21 +830,46 @@ def create_admin_router(settings: Any) -> APIRouter:
         expires = int(now + session_ttl)
         sessions[sid] = _Session(secrets.token_urlsafe(32), float(expires))
         response = _redirect(admin_path)
+        parsed_owner = parse_owner(request.cookies.get(owner_cookie_name, ""))
+        owner_id = parsed_owner[0] if parsed_owner is not None else secrets.token_urlsafe(32)
+        owner_expires = int(now + owner_ttl)
         forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
-        secure_cookie = request.url.scheme == "https" or (
+        secure_cookie = cookie_secure or request.url.scheme == "https" or (
             bool(getattr(settings, "trusted_proxy_headers", True)) and forwarded_proto == "https"
         )
         response.set_cookie(cookie_name, sign(sid, expires), max_age=session_ttl, httponly=True, secure=secure_cookie, samesite="strict", path=admin_path)
+        response.set_cookie(owner_cookie_name, sign_owner(owner_id, owner_expires), max_age=owner_ttl, httponly=True, secure=secure_cookie, samesite="strict", path=admin_path)
         return response
 
     @router.post("/logout")
     async def logout(request: Request):
         sid, _session, _form = await write_auth(request)
         sessions.pop(sid, None)
-        for token in [key for key, value in previews.items() if value.session_id == sid]:
-            previews.pop(token).archive_path.unlink(missing_ok=True)
+        with previews_lock:
+            ordinary = [
+                previews.pop(token)
+                for token in list(previews)
+                if previews[token].session_id == sid and not previews[token].persistent
+            ]
+        for pending in ordinary:
+            pending.archive_path.unlink(missing_ok=True)
         response = _redirect(f"{admin_path}/login")
         response.delete_cookie(cookie_name, path=admin_path)
+        return response
+
+    @router.post("/logout-and-clear")
+    async def logout_and_clear(request: Request):
+        sid, _session, _form = await write_auth(request)
+        owner_key = upload_owner(request)
+        sessions.pop(sid, None)
+        with previews_lock:
+            ordinary = [previews.pop(token) for token in list(previews) if previews[token].session_id == sid and not previews[token].persistent]
+        for pending in ordinary:
+            pending.archive_path.unlink(missing_ok=True)
+        await run_in_threadpool(upload_store.delete_owner_tasks, owner_key)
+        response = _redirect(f"{admin_path}/login")
+        response.delete_cookie(cookie_name, path=admin_path)
+        response.delete_cookie(owner_cookie_name, path=admin_path)
         return response
 
     @router.get("", response_class=HTMLResponse)
@@ -658,10 +903,10 @@ def create_admin_router(settings: Any) -> APIRouter:
             '<section class="management-grid">'
             f'<section class="panel" id="upload"><h3>上传图片</h3><p class="muted">支持 JPG、JPEG、PNG、WebP；可多选。标签为空时，图片仍可先上传，之后在图片库补充。</p>'
             f'<form data-upload-form="1" data-upload-kind="image" data-max-bytes="{upload_max}" method="post" action="{_escape(admin_path)}/upload" enctype="multipart/form-data">{hidden(session.csrf)}{tag_inputs(tag_rows)}<label class="file-picker" data-drop-zone="1">选择图片<span class="help-text" data-file-summary>拖拽文件到此处，或点击选择；每个文件网页上限 {upload_max / 1024 / 1024:.2f} MiB；无 JS 时仍可普通上传</span><input type="file" data-upload-input="1" name="files" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" multiple required></label><p class="alert error" role="alert" data-upload-error hidden></p><button type="submit">上传图片</button></form></section>'
-            f'<section class="panel"><h3>归档导入</h3><p class="muted">上传后先预览，确认后才会导入。</p><form data-upload-form="1" data-upload-kind="archive" data-max-bytes="{int(getattr(settings, "admin_max_archive_bytes", importer.ImportLimits().max_archive_bytes))}" data-login-url="{_escape(admin_path)}/login" method="post" action="{_escape(admin_path)}/archives/preview" enctype="multipart/form-data">{hidden(session.csrf)}{tag_inputs(tag_rows, adjustable_on_confirm=True)}<label class="file-picker" data-drop-zone="1">选择 ZIP / TAR 归档<span class="help-text" data-file-summary>支持 ZIP、TAR.GZ、TGZ；网页上限 {int(getattr(settings, "admin_max_archive_bytes", importer.ImportLimits().max_archive_bytes)) / 1024 / 1024:.2f} MiB</span><input type="file" data-upload-input="1" name="archive" accept=".zip,.tar.gz,.tgz" required></label><p class="alert error" role="alert" data-upload-error hidden></p><p class="message" role="status" aria-live="polite" data-upload-status hidden></p><button type="submit">预览归档</button></form></section>'
+            f'<section class="panel"><h3>归档导入</h3><p class="muted">上传后先预览，确认后才会导入。</p><form data-upload-form="1" data-upload-kind="archive" data-max-bytes="{multipart_archive_max}" data-chunked-enabled="{str(upload_store.enabled).lower()}" data-chunked-url="{_escape(admin_path)}/archives/uploads" data-chunked-max-bytes="{upload_store.max_upload}" data-chunk-threshold-bytes="{upload_store.recommended}" data-login-url="{_escape(admin_path)}/login" method="post" action="{_escape(admin_path)}/archives/preview" enctype="multipart/form-data">{hidden(session.csrf)}{tag_inputs(tag_rows, adjustable_on_confirm=True)}<label class="file-picker" data-drop-zone="1">选择 ZIP / TAR 归档<span class="help-text" data-file-summary>支持 ZIP、TAR.GZ、TGZ；普通上传上限 {multipart_archive_max / 1024 / 1024:.2f} MiB；应用总上传上限 {upload_store.max_upload / 1024 / 1024:.2f} MiB；建议每片 {upload_store.recommended / 1024 / 1024:.2f} MiB。刷新后请重新选择同一文件继续</span><input type="file" data-upload-input="1" name="archive" accept=".zip,.tar.gz,.tgz" required></label><p class="alert error" role="alert" data-upload-error hidden></p><p class="message" role="status" aria-live="polite" data-upload-status hidden></p><div class="actions"><button type="submit">预览归档</button><button type="button" class="warning" data-upload-cancel hidden>取消上传</button></div></form></section>'
             f'<section class="panel"><h3>WebDAV 与缓存</h3><p class="muted">WebDAV 只管理已索引对象；预览仅使用已有缓存。</p><div class="actions"><a class="button secondary" href="{_escape(admin_path)}/images?source=webdav">管理 WebDAV 图片</a>'
             f'<form method="post" action="{_escape(admin_path)}/cache/clear" onsubmit="return confirm(\'确定清理全部 WebDAV 缓存？\')">{hidden(session.csrf)}<button class="warning">清理 WebDAV 缓存</button></form></div></section>'
-            '</section>'
+            f'</section><script src="{_escape(admin_path)}/admin-upload.js" defer></script>'
         )
         return _page("管理总览", body, session.csrf, page_nav("overview", session.csrf))
 
@@ -1009,7 +1254,7 @@ def create_admin_router(settings: Any) -> APIRouter:
                 # pixel dimensions directly, so retaining only the EXIF flag
                 # would make a later scan reverse the admin upload classification.
                 try:
-                    with Image.open(io.BytesIO(payload)) as source:
+                    with importer.pillow_guard(limits.max_image_pixels), Image.open(io.BytesIO(payload)) as source:
                         visual = ImageOps.exif_transpose(source)
                         visual.load()
                         normalized = io.BytesIO()
@@ -1195,6 +1440,285 @@ def create_admin_router(settings: Any) -> APIRouter:
             conn.execute("DELETE FROM webdav_cache")
         return _redirect(admin_path, f"缓存已清理 {removed}")
 
+    def render_archive_preview(token: str, pending: _Preview, session: _Session) -> HTMLResponse:
+        summary = pending.summary
+        hints = sorted({hint for _digest, hint in pending.entries if hint})
+        choices = "".join(
+            f'<label><input type="checkbox" name="map_dirs" value="{_escape(hint)}" checked> 映射目录 {_escape(hint)}</label><br>'
+            for hint in hints
+        )
+        default_value = pending.selected_default_tag
+        with db.get_conn(settings.database_path) as conn:
+            tag_rows = conn.execute("SELECT slug,display_name FROM tags WHERE enabled=1 ORDER BY slug").fetchall()
+        default_options = '<option value="">不添加标签（可选）</option>' + "".join(
+            f'<option value="{_escape(row["slug"])}"{" selected" if str(row["slug"]).lower() == default_value.lower() else ""}>{_escape(row["display_name"])} — {_escape(row["slug"])}</option>'
+            for row in tag_rows
+        )
+        tag_choices = "".join(
+            f'<label><input type="checkbox" name="tags" value="{_escape(row["slug"])}"'
+            f'{" checked" if str(row["slug"]) in pending.selected_tags else ""}> '
+            f'{_escape(row["display_name"])} — {_escape(row["slug"])}</label><br>'
+            for row in tag_rows if str(row["slug"]).lower() != default_value.lower()
+        ) or f'<p class="muted">没有其他可选标签，可先到 <a href="{admin_path}/tags">标签工作台</a> 创建。</p>'
+        summary_items = (
+            ("归档内容", summary["members"]), ("检查图片", summary["files_examined"]),
+            ("可导入", summary["imported"]), ("重复", summary["duplicates"]),
+            ("跳过", summary["skipped"]), ("横屏", summary["desktop"]),
+            ("竖屏", summary["mobile"]), ("方形", summary["square"]),
+        )
+        summary_html = "".join(f"<dt>{_escape(label)}</dt><dd>{int(value)}</dd>" for label, value in summary_items)
+        body = (
+            '<p class="muted">请检查导入内容和标签；确认前仍可调整本次全部图片的标签。</p>'
+            f'<section aria-labelledby="archive-summary-title"><h2 id="archive-summary-title">导入摘要</h2><dl class="detail-grid">{summary_html}</dl></section>'
+            f'<form method="post" action="{admin_path}/archives/confirm">{hidden(session.csrf)}'
+            f'<input type="hidden" name="token" value="{_escape(token)}">'
+            f'<input type="hidden" name="map_dirs_present" value="1">'
+            f'<label>本次所有图片的主标签（可选） <select name="default_tag">{default_options}</select></label>'
+            '<input type="hidden" name="tags_present" value="1"><br>'
+            f'<fieldset><legend>追加标签（可多选）</legend>{tag_choices}</fieldset>'
+            f'{choices}<button>确认导入</button></form>'
+        )
+        return _page("归档预览", body, session.csrf)
+
+    def restore_persistent_preview(task_id: str, sid: str, owner_key: str) -> _Preview:
+        row = upload_store.status(task_id, owner_key)
+        if row["state"] != "preview_ready":
+            raise UploadError(409, "preview_not_ready", "归档尚未完成校验。", int(row["committed_offset"]))
+        _directory, path = upload_store._paths(task_id)
+        pending = _Preview(
+            sid, path, float(row["expires_at"]), int(row["expected_size"]), str(row["archive_sha256"]),
+            json.loads(str(row["summary_json"])), [tuple(item) for item in json.loads(str(row["entries_json"]))],
+            str(row["selected_default_tag"]), tuple(json.loads(str(row["selected_tags_json"]))), True, owner_key,
+        )
+        return pending
+
+    @router.get("/archives/uploads/capabilities")
+    def chunked_capabilities(request: Request):
+        try:
+            upload_api_auth(request)
+            return JSONResponse(upload_store.capabilities(), headers={"Cache-Control": "no-store"})
+        except UploadError as exc:
+            return upload_error(exc)
+
+    def raw_content_length(
+        request: Request,
+        *,
+        limit: int,
+        too_large_code: str = "request_too_large",
+        too_large_message: str = "请求内容超过上限。",
+    ) -> int:
+        raw = list(request.scope.get("headers", []))
+        lengths = [value for name, value in raw if name.lower() == b"content-length"]
+        transfers = [value for name, value in raw if name.lower() == b"transfer-encoding"]
+        if transfers:
+            raise UploadError(400, "chunked_transfer_forbidden", "请求必须提供确定大小。")
+        if not lengths:
+            raise UploadError(411, "content_length_required", "请求缺少大小信息。")
+        if len(lengths) != 1:
+            raise UploadError(400, "invalid_content_length", "请求大小信息无效。")
+        value = lengths[0]
+        if len(value) > 20 or not value.isascii() or not value.isdigit():
+            raise UploadError(400, "invalid_content_length", "请求大小信息无效。")
+        declared = int(value)
+        if declared > limit:
+            raise UploadError(413, too_large_code, too_large_message)
+        return declared
+
+    async def bounded_body(
+        request: Request,
+        declared: int,
+        limit: int,
+        *,
+        too_large_code: str = "request_too_large",
+        too_large_message: str = "请求内容超过上限。",
+    ) -> bytes:
+        chunks: list[bytes] = []
+        received = 0
+        async for chunk in request.stream():
+            received += len(chunk)
+            if received > declared or received > limit:
+                raise UploadError(413, too_large_code, too_large_message)
+            chunks.append(chunk)
+        if received != declared:
+            raise UploadError(400, "content_length_mismatch", "请求内容长度不一致。")
+        return b"".join(chunks)
+
+    @router.post("/archives/uploads")
+    async def chunked_create(request: Request):
+        try:
+            _sid, _session, owner_key = upload_api_auth(request, write=True)
+            declared = raw_content_length(request, limit=64 * 1024)
+            raw_body = await bounded_body(request, declared, 64 * 1024)
+            try:
+                payload = json.loads(raw_body)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise UploadError(400, "invalid_json", "JSON 请求无效。") from exc
+            if not isinstance(payload, dict):
+                raise UploadError(400, "invalid_request", "上传信息无效，请重新选择归档。")
+            if not set(payload) <= {"filename", "size", "fingerprint", "default_tag", "tags"}:
+                raise UploadError(400, "invalid_fields", "上传字段无效。")
+            filename = payload.get("filename")
+            fingerprint = payload.get("fingerprint", "")
+            selected_default = payload.get("default_tag", "")
+            selected_values = payload.get("tags", [])
+            length = payload.get("size")
+            if not isinstance(filename, str) or not filename or len(filename) > 255 or "\x00" in filename:
+                raise UploadError(400, "invalid_fields", "文件名无效。")
+            if isinstance(length, bool) or not isinstance(length, int):
+                raise UploadError(400, "invalid_fields", "归档大小无效。")
+            if not isinstance(fingerprint, str) or len(fingerprint) > 128 or (fingerprint and not re.fullmatch(r"[0-9a-f]{64}", fingerprint)):
+                raise UploadError(400, "invalid_fields", "文件指纹无效。")
+            if not isinstance(selected_default, str) or len(selected_default) > 63:
+                raise UploadError(400, "invalid_fields", "主标签无效。")
+            if not isinstance(selected_values, list) or len(selected_values) > 64 or any(not isinstance(value, str) or len(value) > 63 for value in selected_values):
+                raise UploadError(400, "invalid_fields", "附加标签无效。")
+            selected_default = selected_default.strip()
+            selected_tags = tuple(dict.fromkeys(value.strip() for value in selected_values if value.strip()))
+            lower = filename.lower()
+            suffix = ".tar.gz" if lower.endswith(".tar.gz") else ".tgz" if lower.endswith(".tgz") else ".zip" if lower.endswith(".zip") else ""
+            with db.get_conn(settings.database_path) as conn:
+                _require_existing_tags(conn, [value for value in (selected_default, *selected_tags) if value])
+            row = await run_in_threadpool(upload_store.create, owner_key, filename, suffix, length, selected_default, selected_tags, fingerprint)
+            location = f"{admin_path}/archives/uploads/{row['id']}"
+            return JSONResponse({"id": row["id"], "location": location, **upload_store.capabilities()}, status_code=201, headers={**upload_headers(row), "Location": location})
+        except UploadError as exc:
+            return upload_error(exc)
+        except (ValueError, TypeError):
+            return upload_error(UploadError(400, "invalid_fields", "上传字段无效，请重新选择归档。"))
+
+    @router.head("/archives/uploads/{task_id}")
+    def chunked_status(task_id: str, request: Request):
+        try:
+            _sid, _session, owner_key = upload_api_auth(request)
+            row = upload_store.status(task_id, owner_key)
+            return Response(status_code=204, headers=upload_headers(row))
+        except UploadError as exc:
+            return upload_error(exc)
+
+    @router.patch("/archives/uploads/{task_id}")
+    async def chunked_patch(task_id: str, request: Request):
+        try:
+            _sid, _session, owner_key = upload_api_auth(request, write=True)
+            declared = raw_content_length(
+                request,
+                limit=upload_store.maximum,
+                too_large_code="chunk_too_large",
+                too_large_message="当前分片过大，请使用更小分片重试。",
+            )
+            raw_offsets = [value for name, value in request.scope.get("headers", []) if name.lower() == b"upload-offset"]
+            if len(raw_offsets) != 1 or len(raw_offsets[0]) > 20 or not raw_offsets[0].isascii() or not raw_offsets[0].isdigit():
+                raise UploadError(400, "invalid_headers", "分片上传信息无效，请刷新后重试。")
+            if request.headers.get("content-type", "").partition(";")[0].strip().lower() != "application/offset+octet-stream":
+                raise UploadError(415, "unsupported_chunk_type", "分片格式不受支持，请刷新页面后重试。")
+            row = await upload_store.append(
+                task_id,
+                owner_key,
+                request,
+                int(raw_offsets[0]),
+                declared,
+            )
+            return Response(status_code=204, headers=upload_headers(row))
+        except UploadError as exc:
+            return upload_error(exc)
+
+    def validate_chunked_archive(task_id: str, owner_key: str) -> Any:
+        with upload_store.locked(task_id, owner_key) as (row, _directory, path, handle):
+            row = upload_store._reconcile_locked(row, handle)
+            if row["state"] == "preview_ready":
+                return row
+            if row["state"] != "receiving" or int(row["committed_offset"]) != int(row["expected_size"]):
+                raise UploadError(409, "upload_incomplete", "归档尚未上传完成。", int(row["committed_offset"]))
+            digest = hashlib.sha256()
+            total = 0
+            handle.seek(0)
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                total += len(chunk)
+                digest.update(chunk)
+            if total != int(row["expected_size"]):
+                raise UploadError(409, "upload_length_mismatch", "归档长度校验失败，请重新上传。", int(row["committed_offset"]))
+            limits = _limits(settings)
+            if total > limits.max_archive_bytes:
+                raise UploadError(413, "archive_limit_exceeded", "归档超过导入校验上限，请调整配置后重试。")
+            with importer.global_import_lock(upload_tmp_dir):
+                archive_suffix = str(row["suffix"])
+                result = importer.import_archive(
+                    path,
+                    settings.images_dir,
+                    dry_run=True,
+                    square_policy=settings.square_policy,
+                    limits=limits,
+                    archive_suffix=archive_suffix,
+                )
+                entries = _archive_entries(path, limits, archive_suffix)
+                return upload_store.mark_preview(
+                    task_id,
+                    owner_key,
+                    digest.hexdigest(),
+                    result.to_dict(),
+                    entries,
+                    result.import_required_bytes,
+                )
+
+    @router.post("/archives/uploads/{task_id}/complete")
+    async def chunked_complete(task_id: str, request: Request):
+        owner_key: str | None = None
+
+        def record_completion_error(code: str) -> None:
+            if owner_key is None:
+                return
+            try:
+                upload_store.record_error(task_id, owner_key, code)
+            except Exception:
+                logger.exception(
+                    "chunked upload error state could not be recorded",
+                    extra={"upload_task_id": task_id, "upload_error_code": code},
+                )
+
+        try:
+            _sid, _session, owner_key = upload_api_auth(request, write=True)
+            row = await run_in_threadpool(validate_chunked_archive, task_id, owner_key)
+            json.loads(str(row["summary_json"]))
+            [tuple(item) for item in json.loads(str(row["entries_json"]))]
+            return JSONResponse({"status": "preview_ready", "preview_url": f"{admin_path}/archives/uploads/{task_id}/preview"}, headers=upload_headers(row))
+        except UploadError as exc:
+            return upload_error(exc)
+        except importer.ImportStorageError as exc:
+            logger.warning(
+                "chunked archive validation lacked storage",
+                extra={"upload_task_id": task_id, "error_type": type(exc).__name__},
+                exc_info=True,
+            )
+            record_completion_error("insufficient_storage")
+            return upload_error(UploadError(507, "insufficient_storage", "存储空间不足，请清理空间后重试；上传任务已保留。"))
+        except (importer.ImportErrorBase, ValueError, zipfile.BadZipFile, tarfile.TarError, OSError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "chunked archive validation failed",
+                extra={"upload_task_id": task_id, "error_type": type(exc).__name__},
+                exc_info=True,
+            )
+            record_completion_error("invalid_archive")
+            return upload_error(UploadError(400, "invalid_archive", "无法读取归档，请检查格式和内容后重试或取消任务。"))
+
+    @router.get("/archives/uploads/{task_id}/preview")
+    def chunked_preview(task_id: str, request: Request):
+        sid, session = authenticate(request)
+        owner_key = upload_owner(request)
+        try:
+            pending = restore_persistent_preview(task_id, sid, owner_key)
+            return render_archive_preview(task_id, pending, session)
+        except UploadError as exc:
+            raise HTTPException(exc.status, exc.message) from exc
+
+    @router.delete("/archives/uploads/{task_id}")
+    def chunked_cancel(task_id: str, request: Request):
+        try:
+            _sid, _session, owner_key = upload_api_auth(request, write=True)
+            previews.pop(task_id, None)
+            upload_store.delete(task_id, owner_key)
+            return Response(status_code=204, headers={"Cache-Control": "no-store"})
+        except UploadError as exc:
+            return upload_error(exc)
+
     @router.post("/archives/preview")
     async def archive_preview(request: Request):
         sid, _session, form = await write_auth(request)
@@ -1216,34 +1740,30 @@ def create_admin_router(settings: Any) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(400, "所选标签无效或已停用，请重新选择。") from exc
         limits = _limits(settings)
-        upload_tmp_dir.mkdir(parents=True, exist_ok=True)
+        upload_tmp_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if upload_tmp_dir.is_symlink() or not upload_tmp_dir.is_dir():
+            raise HTTPException(400, "上传临时目录不可用。")
+        os.chmod(upload_tmp_dir, 0o700)
         token = secrets.token_urlsafe(32)
         path = upload_tmp_dir / f"{token}{suffix}"
         try:
-            archive_size = 0
-            archive_hash = hashlib.sha256()
-            with path.open("xb") as handle:
-                while True:
-                    chunk = await uploaded.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    archive_size += len(chunk)
-                    if archive_size > limits.max_archive_bytes:
-                        raise HTTPException(413, "归档超过网页上传上限，请减小文件或使用命令行导入。")
-                    archive_hash.update(chunk)
-                    handle.write(chunk)
-                handle.flush()
-                os.fsync(handle.fileno())
-            if archive_size == 0:
-                raise HTTPException(400, "归档为空，请选择包含图片的归档。")
-            summary = importer.import_archive(path, settings.images_dir, dry_run=True, square_policy=settings.square_policy, limits=limits)
-            entries = _archive_entries(path, limits)
+            archive_size, archive_digest = await run_in_threadpool(
+                _stage_spooled_upload,
+                uploaded,
+                path,
+                limit=multipart_archive_max,
+                min_free=upload_store.min_free,
+                reserved_bytes=upload_store.receiving_reserved_bytes(),
+            )
+            with importer.global_import_lock(upload_tmp_dir):
+                summary = importer.import_archive(path, settings.images_dir, dry_run=True, square_policy=settings.square_policy, limits=limits)
+                entries = _archive_entries(path, limits)
             previews[token] = _Preview(
                 sid,
                 path,
                 time.time() + preview_ttl,
                 archive_size,
-                archive_hash.hexdigest(),
+                archive_digest,
                 summary.to_dict(),
                 entries,
                 selected_default_tag,
@@ -1255,82 +1775,139 @@ def create_admin_router(settings: Any) -> APIRouter:
         except (importer.ImportErrorBase, ValueError, zipfile.BadZipFile, tarfile.TarError, OSError) as exc:
             path.unlink(missing_ok=True)
             raise HTTPException(400, "无法读取归档，请检查格式和内容后重试。") from exc
-        hints = sorted({hint for _digest, hint in entries if hint})
-        choices = "".join(
-            f'<label><input type="checkbox" name="map_dirs" value="{_escape(hint)}" checked> 映射目录 {_escape(hint)}</label><br>'
-            for hint in hints
-        )
-        default_value = selected_default_tag
-        with db.get_conn(settings.database_path) as conn:
-            tag_rows = conn.execute(
-                "SELECT slug,display_name FROM tags WHERE enabled=1 ORDER BY slug"
-            ).fetchall()
-        default_options = '<option value="">不添加标签（可选）</option>' + "".join(
-            f'<option value="{_escape(row["slug"])}"{" selected" if str(row["slug"]).lower() == default_value.lower() else ""}>{_escape(row["display_name"])} — {_escape(row["slug"])}</option>'
-            for row in tag_rows
-        )
-        tag_choices = "".join(
-            f'<label><input type="checkbox" name="tags" value="{_escape(row["slug"])}"'
-            f'{" checked" if str(row["slug"]) in selected_extra_tags else ""}> '
-            f'{_escape(row["display_name"])} — {_escape(row["slug"])}</label><br>'
-            for row in tag_rows
-            if str(row["slug"]).lower() != default_value.lower()
-        )
-        if not tag_choices:
-            tag_choices = f'<p class="muted">没有其他可选标签，可先到 <a href="{admin_path}/tags">标签工作台</a> 创建。</p>'
-        summary_items = (
-            ("归档内容", summary.members),
-            ("检查图片", summary.files_examined),
-            ("可导入", summary.imported),
-            ("重复", summary.duplicates),
-            ("跳过", summary.skipped),
-            ("横屏", summary.desktop),
-            ("竖屏", summary.mobile),
-            ("方形", summary.square),
-        )
-        summary_html = "".join(
-            f"<dt>{_escape(label)}</dt><dd>{int(value)}</dd>"
-            for label, value in summary_items
-        )
-        body = (
-            '<p class="muted">请检查导入内容和标签；确认前仍可调整本次全部图片的标签。</p>'
-            f'<section aria-labelledby="archive-summary-title"><h2 id="archive-summary-title">导入摘要</h2><dl class="detail-grid">{summary_html}</dl></section>'
-            f'<form method="post" action="{admin_path}/archives/confirm">{hidden(_session.csrf)}'
-            f'<input type="hidden" name="token" value="{_escape(token)}">'
-            f'<input type="hidden" name="map_dirs_present" value="1">'
-            f'<label>本次所有图片的主标签（可选） <select name="default_tag">{default_options}</select></label><input type="hidden" name="tags_present" value="1"><br>'
-            f'<fieldset><legend>追加标签（可多选）</legend>{tag_choices}</fieldset>'
-            f'{choices}<button>确认导入</button></form>'
-        )
-        return _page("归档预览", body, _session.csrf)
+        return render_archive_preview(token, previews[token], _session)
+
+    def perform_archive_confirm(
+        request: Request,
+        token: str,
+        pending: _Preview,
+        selected_slugs: list[str],
+        selected_hints: set[str],
+        owner_key: str,
+    ) -> Any:
+        def import_locked(
+            path: Path,
+            handle: Any | None = None,
+            archive_suffix: str | None = None,
+        ) -> Any:
+            if handle is None:
+                current_size = path.stat().st_size
+                current_digest = hashlib.sha256()
+                with path.open("rb") as archive_handle:
+                    for chunk in iter(lambda: archive_handle.read(1024 * 1024), b""):
+                        current_digest.update(chunk)
+            else:
+                current_size = os.fstat(handle.fileno()).st_size
+                current_digest = hashlib.sha256()
+                handle.seek(0)
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    current_digest.update(chunk)
+            if current_size != pending.archive_size or not hmac.compare_digest(
+                current_digest.hexdigest(), pending.archive_sha256
+            ):
+                raise UploadError(400, "preview_changed", "预览内容已变化，请重新上传归档。")
+            with db.get_conn(settings.database_path) as conn:
+                try:
+                    selected_tag_ids = list(_require_existing_tags(conn, selected_slugs).values())
+                except ValueError as exc:
+                    raise UploadError(400, "invalid_tags", "所选标签无效或已停用，请重新上传归档。") from exc
+            summary = None
+            try:
+                limits = _limits(settings)
+                # The preview reservation can become stale while another task imports
+                # the same digest. Refresh it under the global import lock so capacity
+                # accounts only for bytes that this confirmation would add now.
+                current_preview = importer.import_archive(
+                    path,
+                    settings.images_dir,
+                    dry_run=True,
+                    square_policy=settings.square_policy,
+                    limits=limits,
+                    archive_suffix=archive_suffix,
+                )
+                upload_store.ensure_import_capacity(token, current_preview.import_required_bytes)
+                summary = importer.import_archive(
+                    path,
+                    settings.images_dir,
+                    dry_run=False,
+                    square_policy=settings.square_policy,
+                    limits=limits,
+                    archive_suffix=archive_suffix,
+                )
+                scan(request)
+                with db.get_conn(settings.database_path) as conn:
+                    for digest, hint in pending.entries:
+                        row = conn.execute("SELECT id FROM images WHERE content_hash=?", (digest,)).fetchone()
+                        if row is None:
+                            continue
+                        for tag_id in selected_tag_ids:
+                            conn.execute(
+                                "INSERT OR IGNORE INTO image_tags(image_id,tag_id,created_at) VALUES(?,?,?)",
+                                (row["id"], tag_id, db.utc_now()),
+                            )
+                        if hint and hint in selected_hints:
+                            hint_id = db.ensure_tag(conn, hint)
+                            conn.execute(
+                                "INSERT OR IGNORE INTO image_tags(image_id,tag_id,created_at) VALUES(?,?,?)",
+                                (row["id"], hint_id, db.utc_now()),
+                            )
+                scan(request)
+                return summary
+            except Exception:
+                images_root = Path(settings.images_dir).resolve()
+                if summary is not None:
+                    for raw_path in summary.created_paths:
+                        candidate = Path(raw_path)
+                        try:
+                            resolved = candidate.resolve(strict=False)
+                            resolved.relative_to(images_root)
+                        except (OSError, ValueError):
+                            continue
+                        if candidate.is_symlink():
+                            continue
+                        candidate.unlink(missing_ok=True)
+                try:
+                    scan(request)
+                except Exception:
+                    pass
+                raise
+
+        if pending.persistent:
+            with upload_store.locked(token, owner_key) as (row, directory, path, handle):
+                if row["state"] != "preview_ready":
+                    raise UploadError(409, "preview_not_ready", "归档尚未完成校验。")
+                upload_store._reconcile_locked(row, handle)
+                with importer.global_import_lock(upload_tmp_dir):
+                    summary = import_locked(path, handle, str(row["suffix"]))
+                    upload_store._delete_locked(token, owner_key, directory)
+                    return summary
+        with importer.global_import_lock(upload_tmp_dir):
+            summary = import_locked(pending.archive_path)
+            pending.archive_path.unlink(missing_ok=True)
+            return summary
 
     @router.post("/archives/confirm")
     async def archive_confirm(request: Request):
         sid, _session, form = await write_auth(request)
         token = str(form.get("token", ""))
+        owner_key = ""
         pending = previews.get(token)
-        if pending is None:
-            raise HTTPException(404, "预览已失效，请重新上传归档。")
+        if pending is None or pending.persistent:
+            try:
+                owner_key = upload_owner(request)
+                pending = await run_in_threadpool(restore_persistent_preview, token, sid, owner_key)
+            except UploadError as exc:
+                raise HTTPException(exc.status, exc.message) from exc
         if pending.expires_at <= time.time():
-            previews.pop(token, None); pending.archive_path.unlink(missing_ok=True)
+            discard_preview(token, pending)
             raise HTTPException(410, "预览已失效，请重新上传归档。")
-        if not hmac.compare_digest(pending.session_id, sid):
+        if not pending.persistent and not hmac.compare_digest(pending.session_id, sid):
             raise HTTPException(403, "无法确认此预览，请重新上传归档。")
-        try:
-            current_size = pending.archive_path.stat().st_size
-            current_digest = hashlib.sha256()
-            with pending.archive_path.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                    current_digest.update(chunk)
-            current_hash = current_digest.hexdigest()
-        except OSError as exc:
-            previews.pop(token, None)
-            pending.archive_path.unlink(missing_ok=True)
-            raise HTTPException(400, "预览文件不可用，请重新上传归档。") from exc
-        if current_size != pending.archive_size or not hmac.compare_digest(current_hash, pending.archive_sha256):
-            previews.pop(token, None)
-            pending.archive_path.unlink(missing_ok=True)
-            raise HTTPException(400, "预览内容已变化，请重新上传归档。")
+        if not pending.persistent:
+            with previews_lock:
+                if token in confirming_tokens or previews.get(token) is not pending:
+                    raise HTTPException(409, "此预览正在确认或已被处理。")
+                confirming_tokens.add(token)
         try:
             if "default_tag" not in form and "tags_present" not in form:
                 form = FormData([
@@ -1343,46 +1920,36 @@ def create_admin_router(settings: Any) -> APIRouter:
             if str(form.get("map_dirs_present", "")) == "1":
                 selected_hints = {db.validate_slug(str(value)) for value in form.getlist("map_dirs")}
                 if not selected_hints <= available_hints:
-                    raise ValueError("目录标签无效，请重新预览归档。")
+                    raise ValueError("invalid directory tag")
             else:
                 selected_hints = available_hints
         except ValueError as exc:
-            previews.pop(token, None)
-            pending.archive_path.unlink(missing_ok=True)
+            with previews_lock:
+                confirming_tokens.discard(token)
+            discard_failed_preview(token, pending)
             raise HTTPException(400, "归档选项无效，请重新上传并预览。") from exc
-        with db.get_conn(settings.database_path) as conn:
-            try:
-                selected_tag_ids = list(_require_existing_tags(conn, selected_slugs).values())
-            except ValueError as exc:
-                previews.pop(token, None)
-                pending.archive_path.unlink(missing_ok=True)
-                raise HTTPException(400, "所选标签无效或已停用，请重新上传归档。") from exc
-        existing_files = {path.resolve() for path in Path(settings.images_dir).rglob("*") if path.is_file()}
+        succeeded = False
         try:
-            summary = importer.import_archive(pending.archive_path, settings.images_dir, dry_run=False, square_policy=settings.square_policy, limits=_limits(settings))
-            scan(request)
-            with db.get_conn(settings.database_path) as conn:
-                for digest, hint in pending.entries:
-                    row = conn.execute("SELECT id FROM images WHERE content_hash=?", (digest,)).fetchone()
-                    if row is None:
-                        continue
-                    for tag_id in selected_tag_ids:
-                        conn.execute(
-                            "INSERT OR IGNORE INTO image_tags(image_id,tag_id,created_at) VALUES(?,?,?)",
-                            (row["id"], tag_id, db.utc_now()),
-                        )
-                    if hint and hint in selected_hints:
-                        hint_id = db.ensure_tag(conn, hint)
-                        conn.execute("INSERT OR IGNORE INTO image_tags(image_id,tag_id,created_at) VALUES(?,?,?)", (row["id"], hint_id, db.utc_now()))
-            scan(request)
-        except Exception:
-            for path in Path(settings.images_dir).rglob("*"):
-                if path.is_file() and path.resolve() not in existing_files:
-                    path.unlink(missing_ok=True)
-            scan(request)
-            raise
+            try:
+                summary = await run_in_threadpool(
+                    perform_archive_confirm, request, token, pending, selected_slugs, selected_hints, owner_key
+                )
+                succeeded = True
+            except importer.ImportStorageError as exc:
+                discard_failed_preview(token, pending)
+                raise HTTPException(507, "存储空间不足，请清理空间后重试；上传任务已保留。") from exc
+            except UploadError as exc:
+                discard_failed_preview(token, pending)
+                raise HTTPException(exc.status, exc.message) from exc
+            except Exception:
+                discard_failed_preview(token, pending)
+                raise
         finally:
-            previews.pop(token, None)
+            with previews_lock:
+                if succeeded:
+                    previews.pop(token, None)
+                confirming_tokens.discard(token)
+        if not pending.persistent:
             pending.archive_path.unlink(missing_ok=True)
         return _redirect(admin_path, f"归档导入 {summary.imported}")
 

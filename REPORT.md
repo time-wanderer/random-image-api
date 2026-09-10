@@ -1,3 +1,89 @@
+# V3.0.0 持久化分片上传实施记录（未发布）
+
+## 范围与状态
+
+本轮直接在项目工作区实现网页大归档分片上传，已完成候选镜像构建、完整自动化测试和远程隔离运行态验收，但尚未提交、推送或发布正式镜像，也未部署到生产环境。计划镜像标签为 `v3`，已有 `v1`、`v2` 继续保留；当前已发布镜像仍为 V2.2.4，以下内容只描述 V3.0.0 未发布源码。
+
+## 技术选型与实现
+
+- 保留普通 multipart 小归档和无 JavaScript fallback；大归档使用浏览器 `File.slice()`、顺序 offset 和服务端能力协商。
+- SQLite 新增 `upload_tasks`，schema 版本升至 3；任务不绑定所有管理员共用的 `ADMIN_TOKEN`，而是绑定独立随机、签名、HttpOnly 上传所有者 Cookie 的不可逆派生值。所有接口仍要求管理 Session，写请求仍要求 CSRF。
+- 每个任务仅保存一个 `upload.bin`。`PATCH` 在读取请求体前执行同任务与单进程全局 in-flight admission：同任务并发稳定返回 `409 upload_in_progress`，全局超额返回 `429 too_many_inflight_chunks`，拒绝请求不会改变 offset。获准请求直接按 ASGI 数据块写入文件，不再使用 `list + join` 保留完整分片及其副本；失败截断回滚，`flush/fsync` 后再事务推进 offset。
+- 完成阶段重新读取全文件，核对总长度并计算 SHA-256，随后复用 importer dry-run、归档成员检查、预览和确认导入。
+- 上传任务创建、分片写入与普通 multipart staging 使用 `UPLOAD_TMP_DIR` 所在文件系统的空间；确认导入使用 `IMAGES_DIR` 所在文件系统。图库容量预算同时扣除其他 `preview_ready` 任务的预计导入字节和其他 `receiving` 任务尚承诺的剩余上传字节，支持临时目录与图库位于不同挂载点。
+- 普通 multipart 优先原子移动可信的服务端 Starlette spool；无法同分区移动时，先按 spool 与受控副本短时并存的最坏峰值检查容量，再逐块复制。实现不访问客户端路径，复制、空间不足和后续归档校验异常均会清理受控目标。
+- 使用应用总上限、活动任务数、剩余字节预留、24 小时 TTL、随机任务目录、路径 containment、`O_NOFOLLOW`、跨进程 `flock`、过期与孤儿清理保护磁盘和一致性。启动、管理请求以及随应用启动和关闭的轻量单实例周期任务都会执行 TTL 清理，不引入 Celery 或 Redis。
+- 上传所有者 Cookie 在临近过期时沿用同一 owner ID 滚动续签，并保持 HttpOnly、SameSite、Path 和 Secure 判定语义；任务恢复身份不会因续签而变化。
+- 默认保留 256 MiB 空闲空间。这一默认值优先兼顾资源有限的小型 VPS；数据库、日志、上传临时目录或图库共用分区时建议按部署容量提高。
+- 标准备份不包含活动临时归档。Backup 与 Restore 均先 fail-closed 查询当前 Compose `api`：明确运行时不可覆盖，Docker/Compose 或状态查询不可用时只有显式离线确认变量才允许继续。完整归档强制同时存在 `data/images/` 与 `data/database/images.db`；Manifest 使用可迁移的项目标识，不记录 VPS 绝对项目路径。
+- Restore 在展开前拒绝规范化后的重复成员、链接、特殊文件与路径逃逸，并限制成员数、单成员和总展开量；默认按 `2 × 归档展开量 + 旧 live 数据量 + 256 MiB` 估算峰值空间，展开倍率最低为 2 且可提高。Restore 先在暂存数据库中清空 `upload_tasks` 并执行 `PRAGMA integrity_check`；旧图库、整个旧数据库目录和旧 `data/tmp/admin/chunked/` 一并进入安全副本，切换失败时保持三者一致回滚，成功时才最终删除分片临时目录。
+
+## 独立审查与修复
+
+- 修复确认导入异常回滚的数据丢失竞态：不再以“全图库前后差集”推断本次文件，只删除 importer 明确返回且仍位于图库根目录内的 `created_paths`，不会误删并发操作产生的文件。
+- confirm 在跨进程全局导入锁内重新执行安全 dry-run，以当前图库状态刷新预计新增字节；同 digest 已被其他任务导入后按 0 新增量检查容量，不重复扣除已上传 archive。
+- 修复归档成员名与 chunked_create 文件名的真实 NUL 校验，避免把字面 `\x00` 错当 NUL。
+- 持久 preview 的确认导入、任务消费和临时目录删除在同一文件锁内完成；确认失败保留任务供重试，成功后并发重复确认无法再次导入。
+- 修复浏览器取消逻辑：只有服务端返回 `204`、`404` 或 `410` 才清除本地恢复索引；`401` 转登录，其他错误保留任务并提示重试。
+- 服务端强制执行协商最小分片，只有最后一片允许小于最小值。
+- 修复 Backup/Restore 在线执行的跨资源一致性风险，并为 Restore 增加完整归档要求、资源配额、安全展开、空间检查，以及覆盖图库、整个数据库目录与分片目录的一致失败回滚。
+- 已复核 `UploadStore.locked()`：打开或 `fdopen` 异常会关闭原始 fd，nonblocking `flock` 的 `BlockingIOError` 会经过 `finally` 关闭 handle；清理遇到已持锁任务会跳过，不删除活跃任务。
+- 定位远程合法 ZIP 在 chunked complete 返回 `400 invalid_archive` 的真实根因：分片任务统一保存为 `upload.bin`，而 importer 和成员摘要读取此前只按磁盘路径扩展名识别格式。现在从受信任任务行读取 `.zip`、`.tar.gz` 或 `.tgz`，在 complete 的 dry-run、成员摘要以及后续 confirm 的再次 dry-run/正式导入中显式传递格式；没有放宽归档安全校验。
+- complete 在进入鉴权前将 `owner_key` 初始化为空，仅在成功取得所有者后记录任务错误；底层异常使用任务 ID、异常类型和固定错误码结构化记录并保留服务端 traceback，客户端仍只收到不泄漏内部异常的固定中文错误。
+- 稳定请求错误契约：PATCH 声明或实际分片超过专用上限统一返回 `chunk_too_large`；初始化 JSON 请求过大仍返回 `request_too_large`；合法 JSON 但顶层不是 object 返回 `invalid_request`，仅语法或编码损坏返回 `invalid_json`。
+- 管理总览继续引用外部 `admin-upload.js`，未重新内联。Python 页面测试只验证 script src、可缓存脚本响应和上传 data attributes；上传、降档、续传与取消行为由 `tests/test_admin_upload.js` 验证。
+- Restore 测试改为运行脚本并验证恢复结果，不再匹配旧硬编码字面；集成测试发现缺失方向目录后，脚本通过变量化 live 图片路径确保 `desktop/`、`mobile/`、`square/` 均存在。
+- `requirements-dev.txt` 固定增加 `pytest-asyncio==1.3.0`，为现有 `pytest.mark.asyncio` 测试提供明确、可复现的插件依赖。
+
+## 创建和修改文件
+
+- 新增：`app/chunked_upload.py`、`tests/test_chunked_upload.py`、`docs/CHUNKED_UPLOAD.md`。
+- 修改：`app/admin.py`、`app/admin_upload.js`、`app/config.py`、`app/db.py`、`app/__init__.py`、`.env.example`、相关测试及公开文档。
+- 本轮 Backup/Restore 安全增量明确修改 `scripts/backup.sh`、`scripts/restore.sh`、`README.md`、`MIGRATION.md`、`REPORT.md`，并新增 `tests/test_backup_restore_scripts.py`；未覆盖或改写其他功能文件。
+
+## 实际执行的检查
+
+- `node tests/test_admin_upload.js`：通过。
+- `node --check app/admin_upload.js` 与 `node --check tests/test_admin_upload.js`：通过。
+- `/opt/venv/bin/python -m compileall -q app tests`：通过。
+- `python -m py_compile ...`：通过。
+- `bash -n scripts/backup.sh scripts/restore.sh scripts/build-image.sh` 与 `sh -n docker-entrypoint.sh`：通过。
+- `git diff --check`：通过。
+- `/opt/venv/bin/python -m unittest -v tests.test_backup_restore_scripts`：8 项隔离集成测试通过；使用临时项目与 `PATH` fake docker，未调用真实 Docker。覆盖 Backup/Restore 在线拒绝、Compose 状态不可确认时 Backup 默认拒绝及显式 override、缺少图库、缺少数据库、超过总展开量、危险空间倍率、重复成员、符号链接、路径逃逸、脚本生成备份再恢复、成功恢复后清空 `upload_tasks` 和分片临时目录，以及最终删除 chunked 失败时图库、旧数据库与旧任务文件一致回滚。
+- `/opt/venv/bin/python -m py_compile tests/test_backup_restore_scripts.py`：通过。
+- 最终使用 `set -Eeuo pipefail` 严格执行 10 阶段检查：`compileall`、目标 `py_compile`、Node 行为测试、Node 语法、Shell 语法、8 项脚本集成测试、脚本 `0755` 权限、版本/schema/NUL 源码守卫、公开内容与 UTF-8 扫描、`git diff --check`；全部通过，末尾输出 `STRICT_FINAL_CHECKS_OK`。
+- `/opt/venv-a0/bin/python` 实际导入 importer 并调用成员名校验，真实 NUL 文件名被 `ArchiveSecurityError` 拒绝；输出 `REAL_NUL_REJECTED_OK`。`/opt/venv/bin/python` 缺少 Pillow，因此未将该运行时的导入失败误报为功能失败。
+- 公开 UI/文档扫描未发现用户域名、真实归档名/数量、服务器绝对路径、固定事故大小或代理品牌；UTF-8 replacement character 扫描无命中。
+- 使用 `/tmp` 隔离目录和标准库实际验证 schema v3、任务创建、顺序写入、非末片最小值拒绝、末片例外、offset 持久化、nonblocking 文件锁、活跃任务清理跳过、TTL 删除：通过。
+- 在 VPS 临时隔离源码副本中使用候选镜像作为一次性测试运行时；未挂载生产数据、未连接生产 Compose。目标测试 `tests/test_chunked_upload.py tests/test_admin.py tests/test_api.py` 共 80 项，全部通过。
+- 同一隔离环境执行全量 `pytest -q -p no:cacheprovider`：精确统计为 `134 passed`、`0 failed`、`0 errors`。首次试跑错误地保留了 `CACHE_DIR`，只导致配置派生测试失败；改为复制源码至容器临时可写目录，并清除 `DATA_DIR`、`IMAGES_DIR`、`DATABASE_PATH`、`LOG_DIR`、`CACHE_DIR`、`UPLOAD_TMP_DIR` 后全量通过，确认这是测试环境覆盖项而非产品逻辑缺陷。
+- 使用最新源码重建候选镜像并执行真实隔离运行态验收：`/health` 返回 V3.0.0 和 `ok`，Uvicorn PID 1 UID 为 `1000`；约 3.09 MiB 的测试 ZIP 以 1 MiB 分片上传，首片提交后重建 API 容器，服务器仍返回正确 offset，随后从该位置续传至完整文件。归档 complete、preview 和 confirm 均通过，确认后临时任务目录立即删除且图片成功进入隔离图库。
+- 同一运行态验收确认：取消部分上传后立即回收 `upload.bin`；将隔离任务置为过期后，后台周期清理在没有额外管理请求的情况下删除任务目录和 SQLite 记录；最终临时上传目录占用为 0 字节、`upload_tasks` 为 0 行。验收前后 VPS 原有容器稳定字段快照完全一致，未挂载、读取、停止或修改生产业务数据与容器。
+- 新增回归覆盖：PATCH 正文读取前的同任务 `409` 与全局 `429` admission、拒绝请求 offset 不变、流式失败回滚、上传临时分区与图库分区分别检查、图库预算扣除其他 receiving 任务承诺、multipart spool 移动或受控复制及异常清理、无请求 TTL 周期回收、应用关闭停止后台任务、owner Cookie 临期滚动续签与任务身份保持、真实 NUL 拒绝与字面转义文件名不误拒。
+- 本轮使用 `/opt/venv-a0/bin/python` 在临时目录真实构造合法 ZIP，将其写入无扩展名的 chunked `upload.bin`，依次验证显式 suffix dry-run、`summary_json`/`entries_json`/`import_required_bytes` 持久化、正式导入与任务删除；输出 `extensionless ZIP preview/schema/confirm passed`。
+- 本轮重新执行 `node --check app/admin_upload.js` 与 `node tests/test_admin_upload.js`：通过，后者输出 `admin_upload.js validation tests passed`。
+- 本轮第一次运行 8 项 Backup/Restore 集成测试时，成功恢复用例真实发现恢复包缺少空的 `mobile/`、`square/` 后脚本未补建目录；修复脚本后重跑 `python -m unittest -v tests.test_backup_restore_scripts`，结果 `Ran 8 tests ... OK`。编辑工具保存脚本后曾导致执行位丢失，已恢复并核验 `scripts/backup.sh`、`scripts/restore.sh`、`docker-entrypoint.sh` 均为 `0755`。
+- 本轮 `compileall`、`bash -n scripts/backup.sh scripts/restore.sh docker-entrypoint.sh` 和 `git diff --check` 均实际通过。
+- 远程测试容器必须清除镜像继承的生产目录环境变量后再运行 pytest，避免 `CACHE_DIR=/app/data/cache/webdav` 等生产默认值污染临时目录配置测试。推荐命令：`env -u DATA_DIR -u IMAGES_DIR -u DATABASE_PATH -u LOG_DIR -u CACHE_DIR -u UPLOAD_TMP_DIR python -m pytest -q`。这属于测试进程环境隔离，不是产品逻辑修复。
+
+## 已解决问题
+
+单请求归档不再是大归档网页上传的唯一选择；普通 multipart 上限与分片应用总上限分离；上传位置可持久恢复；服务端 offset 成为进度权威；分片 `413` 可按服务端能力自动降为 4/2/1 MiB；临时数据不需要 part 合并；确认导入成功后及时清理。页面刷新后不会自动取得本地文件，用户需在同一浏览器重新选择同一文件；管理 Session 过期后可重新登录续传，有效 owner Cookie 临近过期时会保持同一 owner 身份滚动续签。换浏览器、清除 owner Cookie、Cookie 已失效或轮换 `ADMIN_SESSION_SECRET` 后不能接管旧任务。
+
+## 未解决问题与已知风险
+
+- 全量自动化测试和真实隔离 HTTP 运行态验收均已通过，但尚未执行真实浏览器视觉回归与长时间真实网络中断恢复验收；当前不据 HTTP 验收声称视觉验收通过。
+- in-flight admission 是单进程内门控；跨进程同任务仍由 nonblocking `flock` 快速拒绝，但全局并发计数不跨进程聚合。当前 Docker Compose 默认单实例部署符合该边界。
+- SQLite + 本地 bind mount 面向单实例或共享本地文件系统，不支持多副本跨主机并行写同一任务。
+- 应用无法自定义请求到达应用前被上游链路拒绝时的响应，但默认 8 MiB 分片和自动降档可降低单请求体大小。
+- 标准备份不恢复活动上传；跨主机迁移或 Restore 前需完成或取消任务，并在 API 停止写入时执行备份。
+
+## 后续建议
+
+发布后可继续补充真实浏览器视觉回归和长时间真实断网恢复验收，并根据实际 CDN、网关和 VPS 空间调整分片及磁盘安全余量。当前隔离验收未接触生产数据；GitHub 与 Docker Hub 的实际发布状态以本报告后续发布记录为准。
+
+---
+
 # Random Image API V2.2 实施报告
 
 ## 1. 报告范围
@@ -8,7 +94,7 @@
 
 #### 问题与设计结论
 
-V2.2.3 为解释超大归档上传问题，在管理页面直接展示了服务端临时目录、进程内状态、TTL、Cloudflare 临时存储及固定大小故障样例等实现说明。这些信息适合维护文档和实施报告，不适合作为普通管理员执行上传操作时的页面文案。V2.2.4 将两类信息分开：管理页面仅保留当前操作所需的支持格式、动态上限、标签作用范围、上传/校验状态和可执行错误恢复建议；内部存储生命周期、代理边界和故障分析继续记录在技术文档中。
+V2.2.3 为解释超大归档上传问题，在管理页面直接展示了服务端临时目录、进程内状态、TTL、上游临时存储及固定大小故障样例等实现说明。这些信息适合维护文档和实施报告，不适合作为普通管理员执行上传操作时的页面文案。V2.2.4 将两类信息分开：管理页面仅保留当前操作所需的支持格式、动态上限、标签作用范围、上传/校验状态和可执行错误恢复建议；内部存储生命周期、代理边界和故障分析继续记录在技术文档中。
 
 #### 实现方案
 
@@ -45,15 +131,15 @@ V2.2.3 为解释超大归档上传问题，在管理页面直接展示了服务�
 
 #### 网络调研与限制结论
 
-本轮实际检索并核对 Cloudflare 官方 Error 413 与 Workers Limits 文档。官方当前列出的最大请求体为 Free/Pro 100 MB、Business 200 MB、Enterprise 默认 500 MB；Enterprise 可在站点 **Network → Maximum Upload Size** 自助调整至 5 GB，更大值需联系 Cloudflare。站点配置低于请求大小时同样返回 `413`。因此网页有效上限取应用 `ADMIN_MAX_ARCHIVE_BYTES`、Cloudflare 计划边界和 Network 配置中的较小值；应用默认 512 MiB 未提高。多 GiB 归档通常不适合单次网页上传路径，应使用 CLI。
+本轮检索并核对了上游网关的 HTTP `413` 与请求体限制资料。结论是网页有效上限取应用限制与链路中所有上游请求体限制的最小值；上游可在请求到达应用前拒绝。文档因此采用通用代理说明，不绑定具体厂商或套餐。
 
 #### 实现方案
 
 - 普通图片选择与拖拽仅接受扩展名和 MIME 对应的 JPG/JPEG、PNG、WebP，并按每文件 `ADMIN_MAX_UPLOAD_BYTES` 上传前拒绝；非法拖拽不会写入 input，也不会提交，错误区使用中文 `role=alert`。
 - 归档选择与拖拽仅接受 ZIP、TAR.GZ、TGZ，按服务端注入的 `ADMIN_MAX_ARCHIVE_BYTES` 预检并展示文件名、大小和网页上限；超限提示改用 CLI。
-- 归档表单保留 method/action/enctype 的无 JS fallback；有 JS 时使用 `XMLHttpRequest` + `FormData`，展示真实 upload progress、已传 MiB和上传完成后的服务端安全校验状态。认证失效转登录；413、常见 Cloudflare/网关错误、网络中断、超时和中断均显示中文错误并恢复按钮。
+- 归档表单保留 method/action/enctype 的无 JS fallback；有 JS 时使用 `XMLHttpRequest` + `FormData`，展示真实 upload progress、已传 MiB和上传完成后的服务端安全校验状态。认证失效转登录；413、常见上游网关错误、网络中断、超时和中断均显示中文错误并恢复按钮。
 - 上传前可选择多个已有启用标签，空表示不加标签；preview 将字段语义和选择保存到 `_Preview`，确认页默认保留并允许修改。preview 与 confirm 两阶段均从 SQLite 验证标签存在且启用，拒绝未知/禁用标签并清理临时归档。
-- 待确认归档保存于服务端 `UPLOAD_TMP_DIR`，索引只存在进程内存；TTL、登出或重启会清理或使其失效。浏览器或 Cloudflare 可能另用本机或边缘临时存储。
+- 待确认归档保存于服务端 `UPLOAD_TMP_DIR`，索引只存在进程内存；TTL、登出或重启会清理或使其失效。浏览器或上游网关可能另用本机或边缘临时存储。
 - CLI 文档明确其已支持 ZIP/TAR.GZ/TGZ、多 `--tag` 和 `--database-path`，但不直接接受目录；文件夹应先打包，或复制到 `images/{desktop,mobile,square}` 后 rescan。目录标签映射来自归档成员父目录，预览页可复核；上传前标签应用于本次所有图片。
 
 #### 创建和修改的文件
@@ -70,7 +156,7 @@ V2.2.3 为解释超大归档上传问题，在管理页面直接展示了服务�
 - 运行态验收确认容器 `healthy`、版本 `2.2.3`、OOM 为 false、重启次数为 0，Uvicorn PID 1 的 UID 为 `1000`；未登录管理页面 `303` 回退登录页，空标签引导、创建测试标签后的普通图片/归档多标签控件及内联上传进度逻辑通过真实 HTTP/HTML 合同检查。
 - 原有 10 个容器的 ID、镜像和名称等稳定字段验收前后一致；本轮测试容器、候选镜像和远程隔离目录均已清理，长期 VPS SSH 密钥按约定保留。
 - V2.2.3 源码提交 `9e2282783b331e2c80b3aa83f8c1fecaf57b520f` 已同步 GitHub `main`；Docker Hub `v2` 已发布为 `linux/amd64`，发布后 Registry 回读确认 Manifest 摘要为 `sha256:4b752bb391020f90fbf15c5e902d2f767b7b62d702e5731ab21ee80a13ccf82a`、Config 摘要为 `sha256:bb31ae8011517dfffd685fc8063717793e630211da46844224dad52738128fff`，共 12 层。镜像版本由 `app/__init__.py` 提供，隔离容器 `/health` 已实际核验为 `2.2.3`。
-- 已知风险：前端校验只改善体验，不能成为信任边界；服务端 CSRF、实际图片解码、请求/图片/归档限额和两阶段标签验证继续承担安全约束。Cloudflare 在应用前拒绝的请求无法由应用返回自定义页面，只能由 XHR 根据状态码给出提示。本轮未实际通过公网代理上传多 GiB 归档，也未执行浏览器视觉验收。
+- 已知风险：前端校验只改善体验，不能成为信任边界；服务端 CSRF、实际图片解码、请求/图片/归档限额和两阶段标签验证继续承担安全约束。上游网关在应用前拒绝的请求无法由应用返回自定义页面，只能由前端根据状态码给出提示。本轮未实际通过公网代理上传多 GiB 归档，也未执行浏览器视觉验收。
 
 V2.2.2 修复命令行归档导入无法打标签、网页压缩包上传内存与临时文件生命周期、多标签归档关联，以及管理会话失效后 HTML 页面不返回登录页的问题。最终候选镜像完整测试为 `88 passed`，远程健康检查、未登录 HTML `GET` 的 `303` 登录回退和 Uvicorn PID 1 UID `1000` 均通过；发布前后原有 10 个容器快照一致，隔离容器、候选镜像、临时认证和目录均已清理。Docker Hub `qinlingmonkey/random-image-api:v2` 已发布为 V2.2.2、平台 `linux/amd64`；独立回读确认 Manifest/Registry 摘要为 `sha256:7ca9a5958242417a0b1f9b5b5609a437f8158db55ab5323e989adcd098d0ae2f`，Config 摘要为 `sha256:0c1a92c610d5af76bb115f8ceab8d4b70f10be778ee5cef6b0843b7b83267ef3`，共 12 层，Entrypoint 为 `/usr/local/bin/docker-entrypoint.sh`。源码功能提交 `d8752a0321404d8ad7ec2cfa3e2c8d06bf9bbd2b` 已同步 GitHub `main`；长期复用 SSH 密钥按约定保留。
 

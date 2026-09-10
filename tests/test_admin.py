@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import io
+import os
 import re
+import tempfile
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,10 +17,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
-from starlette.datastructures import FormData
+from starlette.datastructures import FormData, UploadFile
 
 from app import db
-from app.admin import create_admin_router
+from app.admin import _stage_spooled_upload, create_admin_router
 from app.catalog import Catalog
 
 ADMIN = "/manage-images"
@@ -66,6 +72,16 @@ def admin_env(tmp_path: Path):
         admin_max_archive_member_bytes=1024 * 1024,
         admin_max_archive_total_bytes=2 * 1024 * 1024,
         admin_max_archive_compression_ratio=200.0,
+        admin_multipart_archive_max_bytes=2 * 1024 * 1024,
+        admin_chunked_upload_enabled=True,
+        admin_chunk_recommended_bytes=8,
+        admin_chunk_min_bytes=1,
+        admin_chunk_max_bytes=16,
+        admin_chunked_max_upload_bytes=2 * 1024 * 1024,
+        admin_chunked_upload_ttl_seconds=60,
+        admin_chunked_max_active_tasks=2,
+        admin_chunked_max_inflight_patches=2,
+        admin_chunked_min_free_bytes=1,
         admin_import_default_tag="imported",
         trusted_proxy_headers=True,
         square_policy="both",
@@ -93,6 +109,12 @@ def admin_env(tmp_path: Path):
 
 def new_client(app: FastAPI) -> TestClient:
     return TestClient(app, base_url="https://testserver")
+
+
+def pending_archive_files(settings) -> list[Path]:
+    """Exclude persistent upload infrastructure from ordinary preview residue checks."""
+    root = settings.upload_tmp_dir
+    return [item for item in root.iterdir() if item.name not in {"chunked", ".import.lock"}]
 
 
 def login(client: TestClient) -> str:
@@ -242,7 +264,7 @@ def test_archive_preview_does_not_write_then_confirm_imports_and_maps_tags(admin
         assert list(settings.images_dir.rglob("*")) == before_files
         with db.get_conn(settings.database_path) as conn:
             assert int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]) == before_rows
-        temporary = list(settings.upload_tmp_dir.iterdir())
+        temporary = pending_archive_files(settings)
         assert len(temporary) == 1
 
         confirmed = client.post(
@@ -256,7 +278,7 @@ def test_archive_preview_does_not_write_then_confirm_imports_and_maps_tags(admin
             follow_redirects=False,
         )
         assert confirmed.status_code == 303, confirmed.text
-        assert not list(settings.upload_tmp_dir.iterdir())
+        assert not pending_archive_files(settings)
         with db.get_conn(settings.database_path) as conn:
             assert int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]) == 2
             slugs = {row[0] for row in conn.execute("SELECT slug FROM tags")}
@@ -279,12 +301,12 @@ def test_archive_preview_is_bound_to_session_and_logout_cleans_temp(admin_env) -
         owner_csrf = login(owner)
         other_csrf = login(other)
         token, _response = preview(owner, owner_csrf, payload)
-        assert len(list(settings.upload_tmp_dir.iterdir())) == 1
+        assert len(pending_archive_files(settings)) == 1
         forbidden = other.post(f"{ADMIN}/archives/confirm", data={"csrf": other_csrf, "token": token})
         assert forbidden.status_code == 403
         assert not list(settings.images_dir.rglob("*.*"))
         assert owner.post(f"{ADMIN}/logout", data={"csrf": owner_csrf}, follow_redirects=False).status_code == 303
-        assert not list(settings.upload_tmp_dir.iterdir())
+        assert not pending_archive_files(settings)
         assert owner.post(f"{ADMIN}/archives/confirm", data={"csrf": owner_csrf, "token": token}).status_code == 401
 
 
@@ -293,11 +315,11 @@ def test_archive_preview_expiry_removes_temp_and_cannot_confirm(admin_env) -> No
     with new_client(app) as client:
         csrf = login(client)
         token, _response = preview(client, csrf, archive_bytes({"safe.png": image_bytes()}))
-        assert list(settings.upload_tmp_dir.iterdir())
+        assert pending_archive_files(settings)
         time.sleep(1.1)
         expired = client.post(f"{ADMIN}/archives/confirm", data={"csrf": csrf, "token": token})
         assert expired.status_code in {404, 410}
-        assert not list(settings.upload_tmp_dir.iterdir())
+        assert not pending_archive_files(settings)
         assert not list(settings.images_dir.rglob("*.*"))
 
 
@@ -313,7 +335,7 @@ def test_malicious_archive_rejected_without_images_db_or_temp_residue(admin_env)
         )
         assert response.status_code == 400
         assert not list(settings.images_dir.rglob("*.*"))
-        assert not list(settings.upload_tmp_dir.glob("*"))
+        assert not pending_archive_files(settings)
         with db.get_conn(settings.database_path) as conn:
             assert int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]) == 0
 
@@ -354,7 +376,7 @@ def test_oversized_archive_is_rejected_without_temp_or_data_residue(admin_env) -
             files={"archive": ("oversized.zip", oversized, "application/zip")},
         )
         assert response.status_code == 413
-        assert not list(settings.upload_tmp_dir.glob("*"))
+        assert not pending_archive_files(settings)
         assert not list(settings.images_dir.rglob("*.*"))
         with db.get_conn(settings.database_path) as conn:
             assert int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]) == 0
@@ -448,11 +470,11 @@ def test_archive_tamper_is_rejected_and_cleaned(admin_env) -> None:
         csrf = login(client)
         assert client.post(f"{ADMIN}/tags", data={"csrf": csrf, "slug": "imported", "display_name": "Imported"}, follow_redirects=False).status_code == 303
         token, _ = preview(client, csrf, archive_bytes({"safe.png": image_bytes()}))
-        pending = next(settings.upload_tmp_dir.iterdir())
+        pending = pending_archive_files(settings)[0]
         pending.write_bytes(pending.read_bytes() + b"tampered")
         response = client.post(f"{ADMIN}/archives/confirm", data={"csrf": csrf, "token": token})
         assert response.status_code == 400
-        assert not list(settings.upload_tmp_dir.iterdir())
+        assert not pending_archive_files(settings)
         assert not list(settings.images_dir.rglob("*.*"))
 
 
@@ -898,22 +920,25 @@ def test_upload_forms_expose_client_validation_progress_and_fallback(admin_env) 
             follow_redirects=False,
         ).status_code == 303
         page = client.get(ADMIN).text
+        upload_script = client.get(f"{ADMIN}/admin-upload.js")
 
+    assert upload_script.status_code == 200
+    assert upload_script.headers["content-type"].startswith("text/javascript")
     assert f'data-upload-kind="image" data-max-bytes="{settings.admin_max_upload_bytes}"' in page
-    assert f'data-upload-kind="archive" data-max-bytes="{settings.admin_max_archive_bytes}"' in page
+    assert f'data-upload-kind="archive" data-max-bytes="{settings.admin_multipart_archive_max_bytes}"' in page
     assert 'accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"' in page
     assert 'accept=".zip,.tar.gz,.tgz"' in page
     assert 'method="post"' in page and 'enctype="multipart/form-data"' in page
+    assert f'<script src="{ADMIN}/admin-upload.js" defer></script>' in page
+    assert "XMLHttpRequest" not in page and "xhr.upload.onprogress" not in page
     assert all(marker in page for marker in (
-        "XMLHttpRequest", "new FormData(form)", "xhr.upload.onprogress",
-        "data-upload-error", "data-upload-status", "xhr.timeout",
-        "[413,502,503,504,520,522,524]",
+        "data-upload-error", "data-upload-status", "data-chunked-enabled",
+        "data-chunked-url", "data-chunked-max-bytes", "data-chunk-threshold-bytes",
     ))
     assert all(text in page for text in (
         "支持 JPG、JPEG、PNG、WebP", "支持 ZIP、TAR.GZ、TGZ",
-        "网页上限 2.00 MiB", "上传前所选标签将应用于本次全部图片",
-        "归档确认页可调整", "上传中…", "正在安全校验并生成预览",
-        "可能超过上传链路限制，请减小文件或使用命令行导入",
+        "普通上传上限 2.00 MiB", "上传前所选标签将应用于本次全部图片",
+        "归档确认页可调整",
     ))
     assert all(text not in page for text in (
         "UPLOAD_TMP_DIR", "进程内存", "TTL", "浏览器", "边缘临时存储",
@@ -952,7 +977,7 @@ def test_archive_preview_preserves_selected_tags_and_confirm_revalidates(admin_e
             data={"csrf": csrf, "token": token, "default_tag": "primary", "tags": "extra", "tags_present": "1"},
         )
         assert rejected.status_code == 400
-        assert not list(settings.upload_tmp_dir.glob("*"))
+        assert not pending_archive_files(settings)
         assert not list(settings.images_dir.rglob("*.*"))
 
 
@@ -987,7 +1012,7 @@ def test_archive_confirm_uses_tags_saved_in_preview_state(admin_env) -> None:
                 )
             }
         assert {"primary", "extra"} <= slugs
-        assert not list(settings.upload_tmp_dir.glob("*"))
+        assert not pending_archive_files(settings)
 
 
 @pytest.mark.parametrize("slug", ["unknown", "disabled"])
@@ -1005,5 +1030,653 @@ def test_archive_preview_rejects_unknown_or_disabled_tag_without_temp(admin_env,
             files={"archive": ("tagged.zip", archive_bytes({"safe.png": image_bytes()}), "application/zip")},
         )
         assert response.status_code == 400
-        assert not list(settings.upload_tmp_dir.glob("*"))
+        assert not pending_archive_files(settings)
         assert not list(settings.images_dir.rglob("*.*"))
+
+
+def chunked_create(client: TestClient, csrf: str, payload: bytes, name: str = "large.zip") -> tuple[str, object]:
+    response = client.post(
+        f"{ADMIN}/archives/uploads",
+        headers={"X-CSRF-Token": csrf},
+        json={"filename": name, "size": len(payload), "fingerprint": hashlib.sha256(payload[:65536] + payload[-65536:]).hexdigest(), "default_tag": "", "tags": []},
+    )
+    assert response.status_code == 201, response.text
+    return str(response.json()["id"]), response
+
+
+def test_chunked_upload_migration_normal_offset_conflict_complete_confirm_and_recovery(admin_env) -> None:
+    settings, app = admin_env
+    settings.admin_chunk_min_bytes = 1
+    settings.admin_chunk_recommended_bytes = 8
+    settings.admin_chunk_max_bytes = 16
+    settings.admin_chunked_max_upload_bytes = 2 * 1024 * 1024
+    settings.admin_chunked_min_free_bytes = 1
+    payload = archive_bytes({"topic/safe.png": image_bytes()})
+    with new_client(app) as client:
+        csrf = login(client)
+        task_id, created = chunked_create(client, csrf, payload)
+        assert created.headers["upload-offset"] == "0"
+        task_dir = settings.upload_tmp_dir / "chunked" / task_id
+        assert [item.name for item in task_dir.iterdir()] == ["upload.bin"]
+        first = client.patch(
+            f"{ADMIN}/archives/uploads/{task_id}",
+            headers={"X-CSRF-Token": csrf, "Upload-Offset": "0", "Content-Type": "application/offset+octet-stream"},
+            content=payload[:8],
+        )
+        assert first.status_code == 204 and first.headers["upload-offset"] == "8"
+        conflict = client.patch(
+            f"{ADMIN}/archives/uploads/{task_id}",
+            headers={"X-CSRF-Token": csrf, "Upload-Offset": "0", "Content-Type": "application/offset+octet-stream"},
+            content=payload[8:16],
+        )
+        assert conflict.status_code == 409
+        assert conflict.headers["upload-offset"] == "8"
+        assert conflict.json()["error"]["code"] == "offset_mismatch"
+        offset = 8
+        while offset < len(payload):
+            part = payload[offset:offset + 16]
+            response = client.patch(
+                f"{ADMIN}/archives/uploads/{task_id}",
+                headers={"X-CSRF-Token": csrf, "Upload-Offset": str(offset), "Content-Type": "application/offset+octet-stream"},
+                content=part,
+            )
+            assert response.status_code == 204, response.text
+            offset = int(response.headers["upload-offset"])
+        assert client.head(f"{ADMIN}/archives/uploads/{task_id}").headers["upload-offset"] == str(len(payload))
+        completed = client.post(f"{ADMIN}/archives/uploads/{task_id}/complete", headers={"X-CSRF-Token": csrf})
+        assert completed.status_code == 200, completed.text
+        preview_page = client.get(completed.json()["preview_url"])
+        assert preview_page.status_code == 200 and "导入摘要" in preview_page.text
+        owner_cookie = client.cookies.get("ria_admin_session_upload_owner")
+        assert owner_cookie
+
+    # Router reconstruction simulates a restart. The same browser retains its
+    # signed owner cookie, then obtains a fresh in-memory admin Session.
+    restarted = FastAPI()
+    restarted.state.catalog = Catalog(settings)
+    restarted.state.catalog.scan()
+    restarted.include_router(create_admin_router(settings))
+    with new_client(restarted) as client:
+        client.cookies.set("ria_admin_session_upload_owner", owner_cookie, path=ADMIN)
+        csrf = login(client)
+        status = client.head(f"{ADMIN}/archives/uploads/{task_id}")
+        assert status.status_code == 204 and status.headers["upload-state"] == "preview_ready"
+        page = client.get(f"{ADMIN}/archives/uploads/{task_id}/preview")
+        token = re.search(r'name="token" value="([^"]+)"', page.text).group(1)  # type: ignore[union-attr]
+        confirmed = client.post(f"{ADMIN}/archives/confirm", data={"csrf": csrf, "token": token}, follow_redirects=False)
+        assert confirmed.status_code == 303, confirmed.text
+        repeated = client.post(f"{ADMIN}/archives/confirm", data={"csrf": csrf, "token": token}, follow_redirects=False)
+        assert repeated.status_code == 404
+        assert not task_dir.exists()
+        with db.get_conn(settings.database_path) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+            assert conn.execute("SELECT 1 FROM upload_tasks WHERE id=?", (task_id,)).fetchone() is None
+
+
+def test_chunked_upload_auth_csrf_quota_limits_cancel_ttl_and_orphan_cleanup(admin_env, monkeypatch) -> None:
+    settings, app = admin_env
+    settings.admin_chunk_min_bytes = 1
+    settings.admin_chunk_recommended_bytes = 4
+    settings.admin_chunk_max_bytes = 8
+    settings.admin_chunked_max_upload_bytes = 32
+    settings.admin_chunked_max_active_tasks = 1
+    settings.admin_chunked_upload_ttl_seconds = 1
+    settings.admin_chunked_min_free_bytes = 1
+    app = FastAPI()
+    app.state.catalog = Catalog(settings)
+    app.state.catalog.scan()
+    app.include_router(create_admin_router(settings))
+    with new_client(app) as client:
+        assert client.post(f"{ADMIN}/archives/uploads", json={"filename": "a.zip", "size": 4}).status_code == 401
+        csrf = login(client)
+        assert client.post(f"{ADMIN}/archives/uploads", json={"filename": "a.zip", "size": 4}).status_code == 403
+        too_large = client.post(f"{ADMIN}/archives/uploads", headers={"X-CSRF-Token": csrf}, json={"filename": "a.zip", "size": 33})
+        assert too_large.status_code == 413 and too_large.json()["error"]["code"] == "upload_too_large"
+        task_id, _ = chunked_create(client, csrf, b"1234")
+        full = client.post(f"{ADMIN}/archives/uploads", headers={"X-CSRF-Token": csrf}, json={"filename": "b.zip", "size": 4})
+        assert full.status_code == 429 and full.json()["error"]["code"] == "too_many_active_uploads"
+        oversized = client.patch(
+            f"{ADMIN}/archives/uploads/{task_id}",
+            headers={"X-CSRF-Token": csrf, "Upload-Offset": "0", "Content-Type": "application/offset+octet-stream"},
+            content=b"123456789",
+        )
+        assert oversized.status_code == 413 and oversized.json()["error"]["code"] == "chunk_too_large"
+        assert client.head(f"{ADMIN}/archives/uploads/{task_id}").headers["upload-offset"] == "0"
+        assert client.delete(f"{ADMIN}/archives/uploads/{task_id}").status_code == 403
+        assert client.delete(f"{ADMIN}/archives/uploads/{task_id}", headers={"X-CSRF-Token": csrf}).status_code == 204
+        assert client.head(f"{ADMIN}/archives/uploads/{task_id}").status_code == 404
+
+        task_id, _ = chunked_create(client, csrf, b"1234")
+        orphan = settings.upload_tmp_dir / "chunked" / ("a" * 48)
+        orphan.mkdir(); (orphan / "upload.bin").write_bytes(b"orphan")
+        old = time.time() - 120
+        os.utime(orphan, (old, old))
+        with db.get_conn(settings.database_path) as conn:
+            conn.execute("UPDATE upload_tasks SET expires_at=? WHERE id=?", (time.time() - 1, task_id))
+        expired = client.head(f"{ADMIN}/archives/uploads/{task_id}")
+        assert expired.status_code in {404, 410}
+        assert not orphan.exists()
+
+
+def test_chunked_upload_rejects_non_object_json_and_fingerprint_mismatch(admin_env) -> None:
+    _settings, app = admin_env
+    with new_client(app) as client:
+        csrf = login(client)
+        for body in ([], "archive"):
+            response = client.post(
+                f"{ADMIN}/archives/uploads",
+                headers={"X-CSRF-Token": csrf},
+                json=body,
+            )
+            assert response.status_code == 400
+            assert response.json()["error"]["code"] == "invalid_request"
+        null_response = client.post(
+            f"{ADMIN}/archives/uploads",
+            headers={
+                "X-CSRF-Token": csrf,
+                "Content-Type": "application/json",
+            },
+            content=b"null",
+        )
+        assert null_response.status_code == 400
+        assert null_response.json()["error"]["code"] == "invalid_request"
+        payload = b"1234"
+        task_id, created = chunked_create(client, csrf, payload)
+        assert created.headers["upload-fingerprint"] == hashlib.sha256(payload + payload).hexdigest()
+        assert client.head(f"{ADMIN}/archives/uploads/{task_id}").headers["upload-fingerprint"] == created.headers["upload-fingerprint"]
+
+
+def test_persistent_preview_owner_survives_relogin_but_isolated_from_other_browser(admin_env) -> None:
+    _settings, app = admin_env
+    payload = archive_bytes({"topic/safe.png": image_bytes()})
+    with new_client(app) as first:
+        csrf = login(first)
+        task_id, _ = chunked_create(first, csrf, payload)
+        offset = 0
+        while offset < len(payload):
+            part = payload[offset:offset + 16]
+            response = first.patch(
+                f"{ADMIN}/archives/uploads/{task_id}",
+                headers={"X-CSRF-Token": csrf, "Upload-Offset": str(offset), "Content-Type": "application/offset+octet-stream"},
+                content=part,
+            )
+            assert response.status_code == 204
+            offset = int(response.headers["upload-offset"])
+        assert first.post(f"{ADMIN}/archives/uploads/{task_id}/complete", headers={"X-CSRF-Token": csrf}).status_code == 200
+        first.post(f"{ADMIN}/logout", data={"csrf": csrf}, follow_redirects=False)
+        csrf = login(first)
+        assert first.get(f"{ADMIN}/archives/uploads/{task_id}/preview").status_code == 200
+
+    with new_client(app) as second:
+        login(second)
+        assert second.head(f"{ADMIN}/archives/uploads/{task_id}").status_code == 404
+        assert second.get(f"{ADMIN}/archives/uploads/{task_id}/preview").status_code == 404
+
+def test_chunked_upload_low_disk_and_file_ahead_rolls_back(admin_env, monkeypatch) -> None:
+    settings, app = admin_env
+    settings.admin_chunk_min_bytes = 1
+    settings.admin_chunk_recommended_bytes = 4
+    settings.admin_chunk_max_bytes = 8
+    settings.admin_chunked_max_upload_bytes = 32
+    settings.admin_chunked_min_free_bytes = 10
+    from app import chunked_upload
+    real_usage = chunked_upload.shutil.disk_usage
+    monkeypatch.setattr(chunked_upload.shutil, "disk_usage", lambda _path: type("Usage", (), {"free": 12})())
+    app = FastAPI()
+    app.state.catalog = Catalog(settings)
+    app.state.catalog.scan()
+    app.include_router(create_admin_router(settings))
+    with new_client(app) as client:
+        csrf = login(client)
+        low = client.post(f"{ADMIN}/archives/uploads", headers={"X-CSRF-Token": csrf}, json={"filename": "a.zip", "size": 4})
+        assert low.status_code == 507 and low.json()["error"]["code"] == "insufficient_storage"
+    monkeypatch.setattr(chunked_upload.shutil, "disk_usage", real_usage)
+
+
+def test_chunked_patch_rejects_invalid_headers_with_machine_errors(admin_env) -> None:
+    _settings, app = admin_env
+    with new_client(app) as client:
+        csrf = login(client)
+        task_id, _ = chunked_create(client, csrf, b"1234")
+        invalid = client.patch(
+            f"{ADMIN}/archives/uploads/{task_id}",
+            headers={"X-CSRF-Token": csrf, "Upload-Offset": "bad", "Content-Length": "4", "Content-Type": "application/offset+octet-stream"},
+            content=b"1234",
+        )
+        assert invalid.status_code == 400
+        assert invalid.json()["error"]["code"] == "invalid_headers"
+        chunked = client.patch(
+            f"{ADMIN}/archives/uploads/{task_id}",
+            headers={"X-CSRF-Token": csrf, "Upload-Offset": "0", "Transfer-Encoding": "chunked", "Content-Type": "application/offset+octet-stream"},
+            content=b"1234",
+        )
+        assert chunked.status_code == 400
+        assert chunked.json()["error"]["code"] == "chunked_transfer_forbidden"
+        assert client.head(f"{ADMIN}/archives/uploads/{task_id}").headers["upload-offset"] == "0"
+
+
+def test_invalid_archive_complete_keeps_retryable_task_until_cancel(admin_env) -> None:
+    settings, app = admin_env
+    with new_client(app) as client:
+        csrf = login(client)
+        payload = b"not-a-zip"
+        task_id, _ = chunked_create(client, csrf, payload)
+        sent = client.patch(
+            f"{ADMIN}/archives/uploads/{task_id}",
+            headers={"X-CSRF-Token": csrf, "Upload-Offset": "0", "Content-Type": "application/offset+octet-stream"},
+            content=payload,
+        )
+        assert sent.status_code == 204
+        for _ in range(2):
+            failed = client.post(f"{ADMIN}/archives/uploads/{task_id}/complete", headers={"X-CSRF-Token": csrf})
+            assert failed.status_code == 400
+            assert failed.json()["error"]["code"] == "invalid_archive"
+        with db.get_conn(settings.database_path) as conn:
+            row = conn.execute("SELECT state,error_code FROM upload_tasks WHERE id=?", (task_id,)).fetchone()
+            assert tuple(row) == ("receiving", "invalid_archive")
+        assert client.delete(f"{ADMIN}/archives/uploads/{task_id}", headers={"X-CSRF-Token": csrf}).status_code == 204
+
+
+def test_chunked_patch_requires_content_length_at_asgi_boundary(admin_env) -> None:
+    _settings, app = admin_env
+
+    class StripLength:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+
+        async def __call__(self, scope, receive, send):
+            if scope.get("type") == "http" and scope.get("method") == "PATCH":
+                scope = dict(scope)
+                scope["headers"] = [
+                    (name, value)
+                    for name, value in scope.get("headers", [])
+                    if name.lower() not in {b"content-length", b"transfer-encoding"}
+                ]
+            await self.wrapped(scope, receive, send)
+
+    with TestClient(StripLength(app), base_url="https://testserver") as client:
+        csrf = login(client)
+        task_id, _ = chunked_create(client, csrf, b"1234")
+        response = client.patch(
+            f"{ADMIN}/archives/uploads/{task_id}",
+            headers={
+                "X-CSRF-Token": csrf,
+                "Upload-Offset": "0",
+                "Content-Type": "application/offset+octet-stream",
+            },
+            content=b"1234",
+        )
+        assert response.status_code == 411
+        assert response.json()["error"]["code"] == "content_length_required"
+
+
+def test_persistent_confirm_failure_rolls_back_only_importer_created_files(admin_env, monkeypatch) -> None:
+    settings, app = admin_env
+    payload = archive_bytes({"safe.png": image_bytes()})
+    unrelated = settings.images_dir / "desktop" / "unrelated.bin"
+    unrelated.write_bytes(b"belongs-to-another-operation")
+
+    with new_client(app) as client:
+        csrf = login(client)
+        task_id, _ = chunked_create(client, csrf, payload)
+        offset = 0
+        while offset < len(payload):
+            part = payload[offset:offset + 16]
+            response = client.patch(
+                f"{ADMIN}/archives/uploads/{task_id}",
+                headers={
+                    "X-CSRF-Token": csrf,
+                    "Upload-Offset": str(offset),
+                    "Content-Type": "application/offset+octet-stream",
+                },
+                content=part,
+            )
+            assert response.status_code == 204
+            offset = int(response.headers["upload-offset"])
+        completed = client.post(
+            f"{ADMIN}/archives/uploads/{task_id}/complete",
+            headers={"X-CSRF-Token": csrf},
+        )
+        assert completed.status_code == 200
+        preview = client.get(completed.json()["preview_url"])
+        match = re.search(r'name="token" value="([^"]+)"', preview.text)
+        assert match
+        token = match.group(1)
+
+        original_scan = app.state.catalog.scan
+        calls = 0
+
+        def fail_once():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("simulated post-import scan failure")
+            return original_scan()
+
+        monkeypatch.setattr(app.state.catalog, "scan", fail_once)
+        with pytest.raises(RuntimeError, match="simulated post-import scan failure"):
+            client.post(
+                f"{ADMIN}/archives/confirm",
+                data={"csrf": csrf, "token": token},
+                follow_redirects=False,
+            )
+
+        assert unrelated.read_bytes() == b"belongs-to-another-operation"
+        imported = [item for item in settings.images_dir.rglob("*.*") if item != unrelated]
+        assert imported == []
+        with db.get_conn(settings.database_path) as conn:
+            assert conn.execute("SELECT 1 FROM upload_tasks WHERE id=?", (task_id,)).fetchone()
+
+
+
+def test_cookie_secure_setting_scheme_and_trusted_forwarded_proto(admin_env) -> None:
+    settings, _app = admin_env
+
+    def login_cookie(*, forced: bool, base_url: str, forwarded: str = "") -> str:
+        settings.admin_cookie_secure = forced
+        app = FastAPI()
+        app.state.catalog = Catalog(settings)
+        app.state.catalog.scan()
+        app.include_router(create_admin_router(settings))
+        headers = {"x-forwarded-proto": forwarded} if forwarded else {}
+        with TestClient(app, base_url=base_url) as client:
+            response = client.post(f"{ADMIN}/login", data={"token": "correct horse"}, headers=headers, follow_redirects=False)
+            return response.headers["set-cookie"].lower()
+
+    assert "secure" in login_cookie(forced=True, base_url="http://testserver")
+    assert "secure" in login_cookie(forced=False, base_url="https://testserver")
+    assert "secure" in login_cookie(forced=False, base_url="http://testserver", forwarded="https")
+    assert "secure" not in login_cookie(forced=False, base_url="http://testserver")
+
+
+def test_logout_and_clear_removes_owner_tasks_but_normal_logout_keeps_them(admin_env) -> None:
+    settings, app = admin_env
+    with new_client(app) as client:
+        csrf = login(client)
+        task_id, _ = chunked_create(client, csrf, b"1234")
+        owner_cookie = client.cookies.get("ria_admin_session_upload_owner")
+        normal = client.post(f"{ADMIN}/logout", data={"csrf": csrf}, follow_redirects=False)
+        assert normal.status_code == 303
+        assert client.cookies.get("ria_admin_session_upload_owner") == owner_cookie
+        with db.get_conn(settings.database_path) as conn:
+            assert conn.execute("SELECT 1 FROM upload_tasks WHERE id=?", (task_id,)).fetchone()
+        csrf = login(client)
+        cleared = client.post(f"{ADMIN}/logout-and-clear", data={"csrf": csrf}, follow_redirects=False)
+        assert cleared.status_code == 303
+        assert client.cookies.get("ria_admin_session_upload_owner") is None
+        with db.get_conn(settings.database_path) as conn:
+            assert conn.execute("SELECT 1 FROM upload_tasks WHERE id=?", (task_id,)).fetchone() is None
+        assert not (settings.upload_tmp_dir / "chunked" / task_id).exists()
+
+
+def test_chunked_create_raw_body_limit_and_duplicate_headers(admin_env) -> None:
+    _settings, app = admin_env
+
+    class RewriteHeaders:
+        def __init__(self, wrapped, mode: str):
+            self.wrapped = wrapped
+            self.mode = mode
+
+        async def __call__(self, scope, receive, send):
+            if scope.get("type") == "http" and scope.get("path", "").endswith("/archives/uploads"):
+                scope = dict(scope)
+                headers = list(scope.get("headers", []))
+                if self.mode == "duplicate":
+                    current = next(value for name, value in headers if name.lower() == b"content-length")
+                    headers.append((b"content-length", current))
+                elif self.mode == "transfer":
+                    headers.append((b"transfer-encoding", b"chunked"))
+                elif self.mode == "oversize":
+                    headers = [(name, b"65537" if name.lower() == b"content-length" else value) for name, value in headers]
+                scope["headers"] = headers
+            await self.wrapped(scope, receive, send)
+
+    for mode, status, code in (
+        ("duplicate", 400, "invalid_content_length"),
+        ("transfer", 400, "chunked_transfer_forbidden"),
+        ("oversize", 413, "request_too_large"),
+    ):
+        with TestClient(RewriteHeaders(app, mode), base_url="https://testserver") as client:
+            csrf = login(client)
+            response = client.post(
+                f"{ADMIN}/archives/uploads",
+                headers={"X-CSRF-Token": csrf},
+                json={"filename": "a.zip", "size": 4, "tags": []},
+            )
+            assert response.status_code == status
+            assert response.json()["error"]["code"] == code
+
+
+def test_chunked_create_field_bounds_are_structured_400(admin_env) -> None:
+    _settings, app = admin_env
+    invalid_payloads = (
+        {"filename": "a" * 256 + ".zip", "size": 4},
+        {"filename": "bad\x00name.zip", "size": 4},
+        {"filename": "a.zip", "size": 4, "fingerprint": "x" * 129},
+        {"filename": "a.zip", "size": 4, "default_tag": "x" * 64},
+        {"filename": "a.zip", "size": 4, "tags": ["a"] * 65},
+        {"filename": "a.zip", "size": 4, "tags": [1]},
+        {"filename": "a.zip", "size": 4, "unknown": "x"},
+    )
+    with new_client(app) as client:
+        csrf = login(client)
+        for payload in invalid_payloads:
+            response = client.post(f"{ADMIN}/archives/uploads", headers={"X-CSRF-Token": csrf}, json=payload)
+            assert response.status_code == 400
+            assert response.json()["error"]["code"] == "invalid_fields"
+
+        literal_escape = client.post(
+            f"{ADMIN}/archives/uploads",
+            headers={"X-CSRF-Token": csrf},
+            json={"filename": r"literal\x00name.zip", "size": 4},
+        )
+        assert literal_escape.status_code == 201
+
+
+def test_two_ordinary_previews_same_digest_and_same_preview_confirm_once(admin_env, monkeypatch) -> None:
+    settings, app = admin_env
+    payload = archive_bytes({"same.png": image_bytes()})
+    entered = Event()
+    release = Event()
+    real_import = __import__("app.importer", fromlist=["import_archive"]).import_archive
+    upload_store_type = __import__("app.chunked_upload", fromlist=["UploadStore"]).UploadStore
+    real_capacity_check = upload_store_type.ensure_import_capacity
+    required_checks: list[int] = []
+
+    def recording_capacity_check(store, task_id, required_bytes):
+        required_checks.append(required_bytes)
+        return real_capacity_check(store, task_id, required_bytes)
+
+    def paused_import(*args, **kwargs):
+        if not kwargs.get("dry_run") and not entered.is_set():
+            entered.set()
+            assert release.wait(5)
+        return real_import(*args, **kwargs)
+
+    monkeypatch.setattr("app.admin.importer.import_archive", paused_import)
+    monkeypatch.setattr(upload_store_type, "ensure_import_capacity", recording_capacity_check)
+    with new_client(app) as owner:
+        csrf = login(owner)
+        first, _ = preview(owner, csrf, payload)
+        second, _ = preview(owner, csrf, payload)
+        cookies = dict(owner.cookies)
+    barrier = Barrier(3)
+
+    def confirm(token: str):
+        with new_client(app) as client:
+            client.cookies.update(cookies)
+            barrier.wait(timeout=2)
+            return client.post(f"{ADMIN}/archives/confirm", data={"csrf": csrf, "token": token}, follow_redirects=False)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(confirm, first), pool.submit(confirm, second)]
+        barrier.wait(timeout=2)
+        assert entered.wait(5)
+        release.set()
+        results = [future.result(timeout=10) for future in futures]
+    assert [response.status_code for response in results] == [303, 303]
+    assert len(list(settings.images_dir.rglob("*.png"))) == 1
+    assert sorted(required_checks) == [0, len(image_bytes())]
+
+    with new_client(app) as owner:
+        owner.cookies.update(cookies)
+        token, _ = preview(owner, csrf, payload)
+    barrier = Barrier(3)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(confirm, token), pool.submit(confirm, token)]
+        barrier.wait(timeout=2)
+        statuses = sorted(future.result(timeout=10).status_code for future in futures)
+    assert statuses in ([303, 404], [303, 409])
+
+
+def test_chunked_patch_rejects_duplicate_content_length_and_transfer_encoding(admin_env) -> None:
+    _settings, app = admin_env
+
+    class RewritePatchHeaders:
+        def __init__(self, wrapped, transfer: bool):
+            self.wrapped = wrapped
+            self.transfer = transfer
+
+        async def __call__(self, scope, receive, send):
+            if scope.get("type") == "http" and scope.get("method") == "PATCH":
+                scope = dict(scope)
+                headers = list(scope.get("headers", []))
+                if self.transfer:
+                    headers.append((b"transfer-encoding", b"chunked"))
+                else:
+                    length = next(value for name, value in headers if name.lower() == b"content-length")
+                    headers.append((b"content-length", length))
+                scope["headers"] = headers
+            await self.wrapped(scope, receive, send)
+
+    for transfer, code in ((False, "invalid_content_length"), (True, "chunked_transfer_forbidden")):
+        with TestClient(RewritePatchHeaders(app, transfer), base_url="https://testserver") as client:
+            csrf = login(client)
+            task_id, _ = chunked_create(client, csrf, b"1234")
+            response = client.patch(
+                f"{ADMIN}/archives/uploads/{task_id}",
+                headers={"X-CSRF-Token": csrf, "Upload-Offset": "0", "Content-Type": "application/offset+octet-stream"},
+                content=b"1234",
+            )
+            assert response.status_code == 400
+            assert response.json()["error"]["code"] == code
+
+
+def test_multipart_spool_staging_checks_peak_space_and_cleans_failures(tmp_path: Path, monkeypatch) -> None:
+    payload = b"server-side-spool"
+    spool = tempfile.SpooledTemporaryFile(max_size=1, mode="w+b")
+    spool.write(payload)
+    uploaded = UploadFile(file=spool, filename="client-name-is-not-a-path.zip")
+    destination = tmp_path / "controlled" / "archive.zip"
+
+    monkeypatch.setattr(
+        "app.admin.shutil.disk_usage",
+        lambda _path: type("Usage", (), {"free": len(payload) + 20})(),
+    )
+    size, digest = _stage_spooled_upload(
+        uploaded,
+        destination,
+        limit=1024,
+        min_free=10,
+    )
+    assert size == len(payload)
+    assert digest == hashlib.sha256(payload).hexdigest()
+    assert destination.read_bytes() == payload
+
+    second_spool = tempfile.SpooledTemporaryFile(max_size=1, mode="w+b")
+    second_spool.write(payload)
+    second = UploadFile(file=second_spool, filename="ignored.zip")
+    rejected = tmp_path / "controlled" / "rejected.zip"
+    monkeypatch.setattr(
+        "app.admin.shutil.disk_usage",
+        lambda _path: type("Usage", (), {"free": len(payload) + 10})(),
+    )
+    with pytest.raises(Exception) as caught:
+        _stage_spooled_upload(
+            second,
+            rejected,
+            limit=1024,
+            min_free=10,
+            reserved_bytes=1,
+        )
+    assert getattr(caught.value, "status_code", None) == 507
+    assert not rejected.exists()
+    spool.close()
+    second_spool.close()
+
+
+def test_upload_owner_cookie_rolls_near_expiry_without_losing_task(admin_env) -> None:
+    settings, _app = admin_env
+    settings.admin_upload_owner_ttl_seconds = 120
+    app = FastAPI()
+    app.state.catalog = Catalog(settings)
+    app.state.catalog.scan()
+    app.include_router(create_admin_router(settings))
+
+    cookie_name = "ria_admin_session_upload_owner"
+    with new_client(app) as client:
+        csrf = login(client)
+        task_id, _created = chunked_create(client, csrf, b"1234")
+        current = client.cookies.get(cookie_name)
+        assert current
+        owner_id = current.split(".", 1)[0]
+        expiry = int(time.time()) + 1
+        payload = f"upload-owner.{owner_id}.{expiry}"
+        signature = hmac.new(
+            settings.admin_session_secret.encode(),
+            payload.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        existing_owner = next(cookie for cookie in client.cookies.jar if cookie.name == cookie_name)
+        client.cookies.set(
+            cookie_name,
+            f"{owner_id}.{expiry}.{signature}",
+            domain=existing_owner.domain,
+            path=existing_owner.path,
+        )
+
+        response = client.head(f"{ADMIN}/archives/uploads/{task_id}")
+        assert response.status_code == 204
+        set_cookie = response.headers.get("set-cookie", "").lower()
+        assert cookie_name in set_cookie
+        assert "httponly" in set_cookie
+        assert "samesite=strict" in set_cookie
+        assert "secure" in set_cookie
+        assert f"path={ADMIN}" in set_cookie
+        renewed = client.cookies.get(cookie_name)
+        assert renewed and renewed.split(".", 1)[0] == owner_id
+        assert int(renewed.split(".", 2)[1]) > expiry
+
+
+def test_same_persistent_preview_concurrent_confirm_imports_once(admin_env) -> None:
+    settings, app = admin_env
+    payload = archive_bytes({"same.png": image_bytes()})
+    with new_client(app) as owner:
+        csrf = login(owner)
+        task_id, _ = chunked_create(owner, csrf, payload)
+        offset = 0
+        while offset < len(payload):
+            part = payload[offset:offset + 16]
+            response = owner.patch(
+                f"{ADMIN}/archives/uploads/{task_id}",
+                headers={"X-CSRF-Token": csrf, "Upload-Offset": str(offset), "Content-Type": "application/offset+octet-stream"},
+                content=part,
+            )
+            assert response.status_code == 204
+            offset = int(response.headers["upload-offset"])
+        assert owner.post(f"{ADMIN}/archives/uploads/{task_id}/complete", headers={"X-CSRF-Token": csrf}).status_code == 200
+        cookies = dict(owner.cookies)
+    barrier = Barrier(3)
+
+    def confirm():
+        with new_client(app) as client:
+            client.cookies.update(cookies)
+            barrier.wait(timeout=2)
+            return client.post(f"{ADMIN}/archives/confirm", data={"csrf": csrf, "token": task_id}, follow_redirects=False)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(confirm), pool.submit(confirm)]
+        barrier.wait(timeout=2)
+        statuses = sorted(future.result(timeout=10).status_code for future in futures)
+    assert statuses == [303, 404]
+    assert len(list(settings.images_dir.rglob("*.png"))) == 1

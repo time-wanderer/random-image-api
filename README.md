@@ -1,8 +1,10 @@
-# Random Image API V2.2
+# Random Image API V3.0.0（未发布源码）
 
-Random Image API V2 是 V1 的**向后兼容扩展**：保留 V1 的 `GET /random`、`?type=`、本地图库、WebDAV Hybrid、默认 90% 远程优先、缓存、归档 importer、Backup / Restore，并新增主题标签和安全管理 UI。V2.2 在不改变 API 和数据库 schema 的前提下，重点优化管理网页与本地图片整理体验。
+> **V3.0.0 源码状态**：当前工作区新增持久化可恢复网页分片上传，尚未提交、推送或发布镜像。计划镜像标签为 `v3`；已发布的 `v1`、`v2` 镜像继续保留，其中 `v2` 当前仍为 V2.2.4。完整使用与运维说明见：[网页归档分片上传](docs/CHUNKED_UPLOAD.md)。
 
-> 当前源码与 Docker Hub `qinlingmonkey/random-image-api:v2` 均已发布为 V2.2.4。本补丁重新梳理管理端信息层级：页面只显示用户完成上传、预览、标签选择和错误恢复所需的信息，不再混入服务端临时目录、进程状态、代理实现或固定故障样例等内部说明；归档预览改为结构化中文摘要。远程隔离构建、93 项 Python 测试及运行态验收均已通过；发布镜像为 `linux/amd64`，Manifest/Registry 摘要为 `sha256:d00a6f75f028a913cb33062f80d9e3de68da6f82b4e88fb402b7cf64194257da`。`v1` 继续保留用于旧部署与回滚。
+Random Image API V3.0.0 在 V2 能力上新增持久化可恢复网页分片上传，同时保留 `GET /random`、`?type=`、本地图库、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、主题标签和安全管理 UI。
+
+> 当前工作区源码版本为 V3.0.0，尚未提交、推送或发布；当前 `v2` 发布镜像仍为 V2.2.4。旧镜像的历史验收信息保留在实施记录中。
 
 V1 快照见 [docs/V1.md](docs/V1.md)，V1 原地升级和 VPS 迁移见 [MIGRATION.md](MIGRATION.md)。
 
@@ -297,9 +299,9 @@ ADMIN_MAX_UPLOAD_BYTES=26214400
 ADMIN_PAGE_SIZE=20
 ```
 
-归档限制还可通过 `ADMIN_MAX_ARCHIVE_BYTES`、`ADMIN_MAX_ARCHIVE_MEMBERS`、`ADMIN_MAX_ARCHIVE_MEMBER_BYTES`、`ADMIN_MAX_ARCHIVE_TOTAL_BYTES`、`ADMIN_MAX_ARCHIVE_COMPRESSION_RATIO` 调整；默认 `ADMIN_MAX_ARCHIVE_BYTES=536870912`（512 MiB），本补丁没有提高该值。图片像素上限使用 `ADMIN_MAX_IMAGE_PIXELS`，临时目录使用 `UPLOAD_TMP_DIR`。
+归档限制还可通过 `ADMIN_MAX_ARCHIVE_BYTES`、`ADMIN_MAX_ARCHIVE_MEMBERS`、`ADMIN_MAX_ARCHIVE_MEMBER_BYTES`、`ADMIN_MAX_ARCHIVE_TOTAL_BYTES`、`ADMIN_MAX_ARCHIVE_COMPRESSION_RATIO` 调整；V3.0.0 源码默认 `ADMIN_MAX_ARCHIVE_BYTES=8589934592`（8 GiB），普通 multipart 单请求另由 `ADMIN_MULTIPART_ARCHIVE_MAX_BYTES` 控制，默认仍为 512 MiB。图片像素上限使用 `ADMIN_MAX_IMAGE_PIXELS`，临时目录使用 `UPLOAD_TMP_DIR`。
 
-若站点经过 Cloudflare，网页实际上传上限取应用 `ADMIN_MAX_ARCHIVE_BYTES`、Cloudflare 当前计划上限及站点 **Network → Maximum Upload Size** 配置三者中的较小值。超过 Cloudflare 边界会在请求到达应用前返回 `413`；调低 Network 配置也会触发 `413`。多 GiB 归档通常不适合单次网页上传路径，请使用上面的 CLI。
+若站点经过反向代理或托管网关，网页实际上传上限取应用配置与所有上游请求体限制中的较小值。上游拒绝可能在请求到达应用前返回 `413`；应同步检查代理配置。多 GiB 归档优先使用可恢复分片上传或 CLI。
 
 ### 安全边界
 
@@ -307,8 +309,8 @@ ADMIN_PAGE_SIZE=20
 - 登录有限速；会话 Cookie 为 HttpOnly、SameSite=Strict，并由会话密钥签名。
 - 管理会话失效后，HTML `GET` 请求返回 `303` 并跳转到 `/manage-images/login`；`POST` 等写请求仍返回 `401`，不会通过重定向重放写操作。
 - 所有写操作要求 CSRF token；页面输出进行 HTML 转义。
-- 图片和归档使用 `python-multipart` 流式解析，文件部分通过磁盘 spool 处理，并设置请求、单图、归档成员和归档总量限制；请求结束时会确定性关闭上传临时文件。
-- 待确认归档文件保存在服务端 `UPLOAD_TMP_DIR`，preview 索引和管理会话保存在单进程内存；TTL 到期、登出或进程重启会清理或使其失效。上传途中，浏览器或 Cloudflare 还可能使用本机或边缘临时存储，这些都不是永久图库。
+- 图片和归档使用 `python-multipart` 流式解析，文件部分通过服务端磁盘 spool 处理，并设置请求、单图、归档成员和归档总量限制；普通归档优先原子接管同分区 spool，否则在检查最坏临时空间峰值后逐块复制，异常会清理受控目标，请求结束时会确定性关闭 spool。客户端文件名不会被当作服务端路径。
+- 普通 multipart 待确认归档及其 preview 索引仍绑定当前内存 Session，登出、TTL 到期或进程重启后失效；V3 分片任务及 preview 则保存在 SQLite 与单个 `upload.bin` 中，可在同一浏览器保留签名上传所有者 Cookie、重新登录并重新选择同一文件后恢复。有效 owner Cookie 临近过期时会保持原 owner ID 和安全属性滚动续签；换浏览器、清 Cookie 或轮换 `ADMIN_SESSION_SECRET` 后不能接管旧任务。
 - 生产环境应在 HTTPS 反向代理后使用，不要公开 Token、Cookie 或 WebDAV 凭据。
 
 ### 常用操作
@@ -321,7 +323,7 @@ ADMIN_PAGE_SIZE=20
 6. **WebDAV 预览**：已有本地缓存的远端对象可以预览；未缓存对象显示占位卡片，打开管理页不会批量下载远端原图。
 7. **筛选**：可按来源、真实方向、存放目录、启用状态、缓存状态、标签和文件名/HREF 筛选，并选择每页数量。标签筛选提供“全部标签”“无标签”和用户创建标签；“无标签”表示不存在任何标签关系，因此关联了停用标签的图片不算无标签，并可与其他筛选、排序和分页组合。
 8. **缓存**：可运行维护或清空 WebDAV 缓存；缓存可重建，不是永久图库。
-9. **归档**：只接受 ZIP、TAR.GZ、TGZ。先上传到 preview，系统执行完整安全校验和 dry-run；核对摘要、上传前选择的多标签及归档成员父目录映射后再 confirm。上传前标签应用于本次所有图片，空表示不加标签；preview 绑定当前会话、有 TTL，登出、过期或服务重启后不能确认。
+9. **归档**：只接受 ZIP、TAR.GZ、TGZ。先上传到 preview，系统执行完整安全校验和 dry-run；核对摘要、上传前选择的多标签及归档成员父目录映射后再 confirm。上传前标签应用于本次所有图片，空表示不加标签。普通 multipart preview 绑定当前 Session；持久分片 preview 绑定签名上传所有者 Cookie，并受 24 小时任务 TTL 约束。
 
 ## 8. 环境变量
 
@@ -342,6 +344,7 @@ ADMIN_PAGE_SIZE=20
 先备份，再替换为 V2 源码并重建：
 
 ```bash
+docker compose stop api
 ./scripts/backup.sh
 docker compose down
 docker compose build --pull
@@ -354,14 +357,28 @@ V2 首次连接 SQLite 时自动、幂等地迁移 schema，并设置数据库�
 
 ## 10. Backup / Restore
 
+Backup 与 Restore 都必须在 `api` 已停止写入时执行。标准流程会停止服务，并用第二条命令确认没有运行中的 Compose `api` 容器；成功时该命令不输出容器 ID：
+
 ```bash
+docker compose stop api
+docker compose ps --status running -q api
 ./scripts/backup.sh
-# 先停服务；首次不确认只显示风险并退出
+# Restore 仍保持 api 停止；首次不确认只显示风险并退出
 RESTORE_CONFIRM=YES ./scripts/restore.sh /path/to/backup-YYYY-MM-DD-HHMMSS.tar.gz
 docker compose up -d
 ```
 
-备份包含永久图库、SQLite 一致性副本和脱敏配置，不包含 WebDAV 缓存及真实 Secret。恢复前会把现有图库和数据库复制到时间戳安全目录。跨 VPS 迁移流程见 [MIGRATION.md](MIGRATION.md)。
+两个脚本都会 fail-closed 查询当前项目的 Compose 状态：确认 `api` 正在运行时必定拒绝；Docker/Compose 不可用或状态查询失败时也默认拒绝。只有已经通过其他方式确认所有写入停止，才可显式覆盖状态探测失败：
+
+```bash
+BACKUP_OFFLINE_CONFIRMED=1 ./scripts/backup.sh
+RESTORE_CONFIRM=YES RESTORE_OFFLINE_CONFIRMED=1 \
+  ./scripts/restore.sh /path/to/backup.tar.gz
+```
+
+备份是完整数据集，必须同时包含 `data/images/` 和 `data/database/images.db`；缺少任一项的归档不能 Restore。备份包含永久图库、SQLite 一致性副本和脱敏配置，不包含 WebDAV 缓存、真实 Secret 或分片临时 `upload.bin`，Manifest 不记录当前 VPS 的绝对项目路径。SQLite 快照可能带有 `upload_tasks` 行，因此 Restore 会在暂存数据库中清空这些任务行，最终删除默认分片临时目录，避免出现只有元数据、没有归档文件的伪恢复任务；失败回滚同时恢复旧图库、整个旧数据库目录和旧 `data/tmp/admin/chunked/`。
+
+Restore 在展开前拒绝重复成员、链接、特殊文件和路径逃逸，并检查成员数、单成员大小、总展开量与磁盘剩余空间。安全默认值分别为 100000 个成员、单成员 1 GiB、总展开量 20 GiB；峰值空间按 `2 × 归档展开量 + 旧 live 数据量 + 256 MiB` 估算，以覆盖暂存、新 live 副本和旧数据回滚副本。可按受信备份和目标磁盘容量调整 `RESTORE_MAX_MEMBERS`、`RESTORE_MAX_MEMBER_BYTES`、`RESTORE_MAX_TOTAL_BYTES`、`RESTORE_FREE_SPACE_MARGIN_BYTES`，也可用 `RESTORE_EXPANDED_SPACE_FACTOR` 提高展开量倍率，但不能低于 2。恢复前的旧数据保存在 `backups/pre-restore-*`。跨 VPS 迁移流程见 [MIGRATION.md](MIGRATION.md)。
 
 ## 11. 开发验证
 
@@ -376,3 +393,10 @@ V2.2.4 最终候选镜像的完整 Python 测试为 `93 passed`，Node 上传校
 Docker Hub `v2` 已发布为 V2.2.4；独立回读确认 Manifest/Registry 摘要为 `sha256:d00a6f75f028a913cb33062f80d9e3de68da6f82b4e88fb402b7cf64194257da`，Config 摘要为 `sha256:483a5c6f60e276eaf1343f444158700ef89cfe2f1dba50267b27c82cefef64e9`，平台为 `linux/amd64`，共 12 层。
 
 当前 V2 实施与验证记录见 [REPORT.md](REPORT.md)。
+
+
+## V3.0.0 可恢复网页分片上传（未发布源码）
+
+管理网页保留普通 multipart 小归档上传；超过服务端建议分片大小时使用顺序 offset 分片。浏览器先读取服务端 capabilities，默认建议 8 MiB，遇到 `413` 自动降为 4/2/1 MiB，总体进度只按服务端确认的 `Upload-Offset` 计算。任务状态持久化到 SQLite，单任务临时目录只含一个 `upload.bin`。页面刷新不会自动取得本地文件；同一浏览器重新登录后需要重新选择同一文件，页面才会按文件指纹和服务端 offset 继续。
+
+应用总上传上限、普通单请求上限和建议分片大小是三个独立概念。默认应用总上限 8 GiB、普通单请求 512 MiB、建议分片 8 MiB；浏览器遇到 `413` 会在服务端范围内自适应降为 4/2/1 MiB。`PATCH` 在读取 body 前执行同任务与进程级 in-flight admission，并直接逐块写入，避免完整分片的 `list + join` 双份内存。上传和普通 staging 检查 `UPLOAD_TMP_DIR` 所在文件系统，确认导入检查 `IMAGES_DIR` 所在文件系统，并为其他 receiving 任务保留尚承诺的字节。活动任务默认最多 2 个、TTL 24 小时；启动、管理请求和随应用关闭而停止的轻量周期任务都会清理过期数据。详见 [网页归档分片上传](docs/CHUNKED_UPLOAD.md)。

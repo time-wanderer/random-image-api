@@ -49,6 +49,28 @@ CREATE TABLE IF NOT EXISTS webdav_cache (
  accessed_at REAL NOT NULL, maintenance_mark INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_webdav_cache_lru ON webdav_cache(accessed_at);
+CREATE TABLE IF NOT EXISTS upload_tasks (
+ id TEXT PRIMARY KEY,
+ owner_key TEXT NOT NULL,
+ original_name TEXT NOT NULL,
+ suffix TEXT NOT NULL CHECK(suffix IN ('.zip','.tar.gz','.tgz')),
+ expected_size INTEGER NOT NULL CHECK(expected_size > 0),
+ committed_offset INTEGER NOT NULL DEFAULT 0 CHECK(committed_offset >= 0 AND committed_offset <= expected_size),
+ state TEXT NOT NULL CHECK(state IN ('receiving','preview_ready','failed')),
+ archive_sha256 TEXT,
+ summary_json TEXT,
+ entries_json TEXT,
+ import_required_bytes INTEGER NOT NULL DEFAULT 0 CHECK(import_required_bytes >= 0),
+ selected_default_tag TEXT NOT NULL DEFAULT '',
+ selected_tags_json TEXT NOT NULL DEFAULT '[]',
+ client_fingerprint TEXT NOT NULL DEFAULT '',
+ created_at REAL NOT NULL,
+ updated_at REAL NOT NULL,
+ expires_at REAL NOT NULL,
+ error_code TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_upload_tasks_owner_state ON upload_tasks(owner_key,state);
+CREATE INDEX IF NOT EXISTS idx_upload_tasks_expires ON upload_tasks(expires_at);
 """
 
 
@@ -85,10 +107,14 @@ def migrate(conn: sqlite3.Connection) -> None:
     for name, definition in remote_additions.items():
         if name not in _columns(conn, "webdav_objects"):
             conn.execute(f"ALTER TABLE webdav_objects ADD COLUMN {name} {definition}")
+    if "client_fingerprint" not in _columns(conn, "upload_tasks"):
+        conn.execute("ALTER TABLE upload_tasks ADD COLUMN client_fingerprint TEXT NOT NULL DEFAULT ''")
+    if "import_required_bytes" not in _columns(conn, "upload_tasks"):
+        conn.execute("ALTER TABLE upload_tasks ADD COLUMN import_required_bytes INTEGER NOT NULL DEFAULT 0")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_images_content_hash ON images(content_hash) WHERE content_hash IS NOT NULL")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_images_enabled_orientation ON images(enabled, orientation)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_webdav_enabled_orientation ON webdav_objects(enabled, remote_present, orientation)")
-    conn.execute("PRAGMA user_version=2")
+    conn.execute("PRAGMA user_version=3")
 
 
 def connect(database_path: Path) -> sqlite3.Connection:

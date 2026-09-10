@@ -8,6 +8,8 @@ which random-selection pools may use them.
 from __future__ import annotations
 
 import argparse
+import errno
+import fcntl
 import hashlib
 import io
 import json
@@ -19,8 +21,10 @@ import stat
 import sys
 import tarfile
 import tempfile
+import threading
 import warnings
 import zipfile
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Iterator, Literal
@@ -30,6 +34,8 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 SquarePolicy = Literal["both", "desktop", "mobile"]
 _FORMAT_EXTENSIONS = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}
 _DRIVE_RE = re.compile(r"^[A-Za-z]:")
+_PILLOW_LOCK = threading.RLock()
+_STORAGE_ERRNOS = {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}
 
 
 class ImportErrorBase(Exception):
@@ -38,6 +44,50 @@ class ImportErrorBase(Exception):
 
 class ArchiveSecurityError(ImportErrorBase):
     """The archive violates a security or resource limit."""
+
+
+class ImportStorageError(ImportErrorBase):
+    """Storage exhaustion suitable for a retryable user-facing response."""
+
+
+def is_storage_error(exc: BaseException) -> bool:
+    return isinstance(exc, OSError) and exc.errno in _STORAGE_ERRNOS
+
+
+@contextmanager
+def pillow_guard(max_pixels: int):
+    """Serialize changes to Pillow's process-global decompression limit."""
+    with _PILLOW_LOCK:
+        previous = Image.MAX_IMAGE_PIXELS
+        try:
+            Image.MAX_IMAGE_PIXELS = max_pixels
+            yield
+        finally:
+            Image.MAX_IMAGE_PIXELS = previous
+
+
+@contextmanager
+def global_import_lock(upload_tmp_dir: str | os.PathLike[str]):
+    """Lock an entire import/scan/tag/consume transaction across processes."""
+    root = Path(upload_tmp_dir)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if root.is_symlink() or not root.is_dir():
+        raise ImportErrorBase("upload temporary directory is unsafe")
+    os.chmod(root, 0o700)
+    lock_path = root / ".import.lock"
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(lock_path, flags, 0o600)
+        os.fchmod(fd, 0o600)
+    except OSError as exc:
+        if is_storage_error(exc):
+            raise ImportStorageError("insufficient storage; retry after freeing space") from exc
+        raise ImportErrorBase(f"cannot open import lock: {exc}") from exc
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +116,7 @@ class ImportSummary:
     mobile: int = 0
     square: int = 0
     bytes_read: int = 0
+    import_required_bytes: int = 0
     tag_targets: list[dict[str, object]] = field(default_factory=list, repr=False)
     created_paths: list[str] = field(default_factory=list, repr=False)
 
@@ -186,25 +237,22 @@ def _read_limited(stream: BinaryIO, member: _Member, total_so_far: int, limits: 
 
 
 def _inspect_image(payload: bytes, max_pixels: int) -> tuple[str, int, int]:
-    old_limit = Image.MAX_IMAGE_PIXELS
     try:
-        Image.MAX_IMAGE_PIXELS = max_pixels
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(payload)) as image:
-                detected = (image.format or "").upper()
-                if detected not in _FORMAT_EXTENSIONS:
-                    raise UnidentifiedImageError(f"unsupported image format: {detected or 'unknown'}")
-                image.load()
-                visual = ImageOps.exif_transpose(image)
-                width, height = visual.size
+        with pillow_guard(max_pixels):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                with Image.open(io.BytesIO(payload)) as image:
+                    detected = (image.format or "").upper()
+                    if detected not in _FORMAT_EXTENSIONS:
+                        raise UnidentifiedImageError(f"unsupported image format: {detected or 'unknown'}")
+                    image.load()
+                    visual = ImageOps.exif_transpose(image)
+                    width, height = visual.size
         return detected, width, height
     except Image.DecompressionBombError as exc:
         raise ArchiveSecurityError(f"Pillow decompression-bomb limit exceeded: {exc}") from exc
     except Image.DecompressionBombWarning as exc:
         raise ArchiveSecurityError(f"Pillow decompression-bomb limit exceeded: {exc}") from exc
-    finally:
-        Image.MAX_IMAGE_PIXELS = old_limit
 
 
 def _orientation(width: int, height: int) -> str:
@@ -226,11 +274,22 @@ def _destination_orientation(orientation: str, square_policy: SquarePolicy) -> s
     return orientation
 
 
-def _open_archive(path: Path):
+def _open_archive(path: Path, archive_suffix: str | None = None):
+    """Open an archive, optionally using trusted format metadata.
+
+    Chunked uploads are intentionally stored as ``upload.bin``. Their
+    validated original suffix must therefore be supplied explicitly rather
+    than inferred from the temporary storage name.
+    """
+    suffix = archive_suffix.lower() if archive_suffix is not None else None
+    if suffix is not None and suffix not in {".zip", ".tar.gz", ".tgz"}:
+        raise ImportErrorBase("supported archive types are .zip, .tar.gz, and .tgz")
     lower = path.name.lower()
-    if lower.endswith(".zip"):
+    if suffix == ".zip" or (suffix is None and lower.endswith(".zip")):
         return zipfile.ZipFile(path, "r"), "zip"
-    if lower.endswith((".tar.gz", ".tgz")):
+    if suffix in {".tar.gz", ".tgz"} or (
+        suffix is None and lower.endswith((".tar.gz", ".tgz"))
+    ):
         return tarfile.open(path, "r:gz"), "tar"
     raise ImportErrorBase("supported archive types are .zip, .tar.gz, and .tgz")
 
@@ -242,6 +301,7 @@ def import_archive(
     dry_run: bool = False,
     square_policy: SquarePolicy = "both",
     limits: ImportLimits | None = None,
+    archive_suffix: str | None = None,
 ) -> ImportSummary:
     """Validate and import supported images from a ZIP or gzip-compressed TAR."""
     if square_policy not in {"both", "desktop", "mobile"}:
@@ -264,7 +324,7 @@ def import_archive(
 
     try:
         try:
-            archive, kind = _open_archive(source)
+            archive, kind = _open_archive(source, archive_suffix)
         except (zipfile.BadZipFile, tarfile.TarError, OSError) as exc:
             raise ImportErrorBase(f"invalid archive: {exc}") from exc
         with archive:
@@ -326,6 +386,7 @@ def import_archive(
                     continue
                 seen.add(identity)
                 summary.imported += 1
+                summary.import_required_bytes += len(payload)
                 if not dry_run:
                     assert staging is not None
                     staged_file = staging / f"{len(staged)}-{digest}{_FORMAT_EXTENSIONS[detected]}"
@@ -349,6 +410,10 @@ def import_archive(
                 summary.created_paths.clear()
                 raise
         return summary
+    except OSError as exc:
+        if is_storage_error(exc):
+            raise ImportStorageError("insufficient storage; retry after freeing space") from exc
+        raise
     finally:
         if staging is not None:
             shutil.rmtree(staging, ignore_errors=True)

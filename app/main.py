@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from app import __version__, db
 from app.admin import create_admin_router
 from app.catalog import Catalog, NoImageAvailable
+from app.chunked_upload import UploadStore
 from app.config import Settings, get_settings
 from app.ua import detect_client_type, describe_user_agent
 from app.webdav import NoRemoteImageAvailable, WebDAVError, WebDAVManager
@@ -66,6 +67,7 @@ async def lifespan(app: FastAPI):
     app.state.catalog = catalog
     app.state.webdav = webdav
     app.state.stop_scanner = threading.Event()
+    upload_store: UploadStore = app.state.upload_store
 
     if settings.scan_on_startup:
         try:
@@ -83,16 +85,27 @@ async def lifespan(app: FastAPI):
     def scanner_loop() -> None:
         local_interval = max(5, settings.scan_interval_seconds)
         webdav_interval = max(5, settings.webdav_sync_interval_seconds)
+        upload_cleanup_interval = max(
+            0.1,
+            float(getattr(settings, "admin_chunked_cleanup_interval_seconds", 30.0)),
+        )
         next_local_scan = time.monotonic() + local_interval
         next_webdav_sync = time.monotonic() + webdav_interval
+        next_upload_cleanup = time.monotonic() + upload_cleanup_interval
         while True:
             now = time.monotonic()
-            next_run = next_local_scan
+            next_run = min(next_local_scan, next_upload_cleanup)
             if webdav.enabled:
                 next_run = min(next_run, next_webdav_sync)
             if app.state.stop_scanner.wait(max(0.1, next_run - now)):
                 break
             now = time.monotonic()
+            if now >= next_upload_cleanup:
+                try:
+                    upload_store.clean()
+                except Exception:
+                    logger.exception("periodic chunked upload cleanup failed")
+                next_upload_cleanup = now + upload_cleanup_interval
             if now >= next_local_scan:
                 try:
                     catalog.scan()
@@ -134,7 +147,8 @@ def create_app(
     application.state.settings = settings
     application.state.webdav_transport = webdav_transport
     application.state.rng = rng or random
-    application.include_router(create_admin_router(settings))
+    application.state.upload_store = UploadStore(settings)
+    application.include_router(create_admin_router(settings, application.state.upload_store))
 
     @application.middleware("http")
     async def access_log(request: Request, call_next):

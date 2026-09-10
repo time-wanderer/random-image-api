@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import errno
 import io
+import os
 import stat
 import tarfile
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
+import threading
 from pathlib import Path
 
 import pytest
@@ -24,6 +28,24 @@ def image_bytes(fmt: str, size: tuple[int, int], color: str = "red") -> bytes:
     output = io.BytesIO()
     Image.new("RGB", size, color).save(output, format=fmt)
     return output.getvalue()
+
+
+def test_explicit_archive_suffix_opens_extensionless_chunk_storage(tmp_path: Path) -> None:
+    stored = tmp_path / "upload.bin"
+    with zipfile.ZipFile(stored, "w") as archive:
+        archive.writestr("safe.png", image_bytes("PNG", (12, 8)))
+
+    with pytest.raises(importer_module.ImportErrorBase):
+        import_archive(stored, tmp_path / "without-metadata", dry_run=True)
+
+    summary = import_archive(
+        stored,
+        tmp_path / "with-metadata",
+        dry_run=True,
+        archive_suffix=".zip",
+    )
+    assert summary.imported == 1
+    assert summary.import_required_bytes > 0
 
 
 def make_zip(path: Path, files: dict[str, bytes]) -> Path:
@@ -244,3 +266,81 @@ def test_cli_tags_require_database_and_dry_run_writes_nothing(tmp_path: Path, ca
     ]) == 0
     assert not output.exists()
     assert not database.exists()
+
+
+
+def test_dry_run_reports_only_new_image_bytes(tmp_path: Path) -> None:
+    existing = image_bytes("PNG", (20, 10), "red")
+    added = image_bytes("PNG", (10, 20), "blue")
+    output = tmp_path / "images"
+    import_archive(make_zip(tmp_path / "first.zip", {"existing.png": existing}), output)
+    archive = make_zip(tmp_path / "preview.zip", {"a.png": existing, "b.png": added})
+
+    summary = import_archive(archive, output, dry_run=True)
+
+    assert (summary.imported, summary.duplicates) == (1, 1)
+    assert summary.import_required_bytes == len(added)
+    assert summary.to_dict()["import_required_bytes"] == len(added)
+
+
+def test_global_import_lock_permissions_and_nofollow(tmp_path: Path) -> None:
+    root = tmp_path / "uploads"
+    with importer_module.global_import_lock(root):
+        assert stat.S_IMODE(root.stat().st_mode) == 0o700
+        assert stat.S_IMODE((root / ".import.lock").stat().st_mode) == 0o600
+    (root / ".import.lock").unlink()
+    outside = tmp_path / "outside"
+    outside.write_text("keep", encoding="utf-8")
+    (root / ".import.lock").symlink_to(outside)
+    with pytest.raises(importer_module.ImportErrorBase):
+        with importer_module.global_import_lock(root):
+            pass
+    assert outside.read_text(encoding="utf-8") == "keep"
+
+
+def test_import_enospc_is_retryable_and_rolls_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    archive = make_zip(tmp_path / "image.zip", {"x.png": image_bytes("PNG", (20, 10))})
+    real_fsync = os.fsync
+    raised = False
+
+    def fail_once(fd: int) -> None:
+        nonlocal raised
+        if not raised:
+            raised = True
+            raise OSError(errno.ENOSPC, "full")
+        real_fsync(fd)
+
+    monkeypatch.setattr(importer_module.os, "fsync", fail_once)
+    with pytest.raises(importer_module.ImportStorageError):
+        import_archive(archive, tmp_path / "images")
+    assert not [item for item in (tmp_path / "images").rglob("*") if item.is_file()]
+
+
+
+def test_pillow_limit_guard_serializes_threads(monkeypatch: pytest.MonkeyPatch) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    second_entered = threading.Event()
+    original = importer_module.Image.MAX_IMAGE_PIXELS
+
+    def first() -> None:
+        with importer_module.pillow_guard(101):
+            entered.set()
+            assert release.wait(5)
+            assert importer_module.Image.MAX_IMAGE_PIXELS == 101
+
+    def second() -> None:
+        assert entered.wait(5)
+        with importer_module.pillow_guard(202):
+            second_entered.set()
+            assert importer_module.Image.MAX_IMAGE_PIXELS == 202
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        one = pool.submit(first)
+        two = pool.submit(second)
+        assert entered.wait(5)
+        assert not second_entered.wait(0.05)
+        release.set()
+        one.result(timeout=5)
+        two.result(timeout=5)
+    assert importer_module.Image.MAX_IMAGE_PIXELS == original

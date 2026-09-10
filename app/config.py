@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     admin_token: str = ""
     admin_session_secret: str = ""
     admin_path: str = "/manage-images"
+    admin_cookie_secure: bool = False
     admin_cookie_name: str = "ria_admin_session"
     admin_session_ttl_seconds: int = 1800
     admin_preview_ttl_seconds: int = 600
@@ -41,7 +42,19 @@ class Settings(BaseSettings):
     admin_login_max_attempts: int = 5
     admin_max_upload_bytes: int = 25 * 1024 * 1024
     admin_page_size: int = 20
-    admin_max_archive_bytes: int = 512 * 1024 * 1024
+    admin_max_archive_bytes: int = 8 * 1024 * 1024 * 1024
+    admin_multipart_archive_max_bytes: int = 512 * 1024 * 1024
+    admin_chunked_upload_enabled: bool = True
+    admin_chunk_recommended_bytes: int = 8 * 1024 * 1024
+    admin_chunk_min_bytes: int = 1 * 1024 * 1024
+    admin_chunk_max_bytes: int = 16 * 1024 * 1024
+    admin_chunked_max_upload_bytes: int = 8 * 1024 * 1024 * 1024
+    admin_chunked_upload_ttl_seconds: int = 86_400
+    admin_chunked_cleanup_interval_seconds: float = 30.0
+    admin_upload_owner_ttl_seconds: int = 30 * 86_400
+    admin_chunked_max_active_tasks: int = 2
+    admin_chunked_max_inflight_patches: int = 2
+    admin_chunked_min_free_bytes: int = 256 * 1024 * 1024
     admin_max_archive_members: int = 10_000
     admin_max_archive_member_bytes: int = 100 * 1024 * 1024
     admin_max_archive_total_bytes: int = 1024 * 1024 * 1024
@@ -138,6 +151,17 @@ class Settings(BaseSettings):
         "admin_max_upload_bytes",
         "admin_page_size",
         "admin_max_archive_bytes",
+        "admin_multipart_archive_max_bytes",
+        "admin_chunk_recommended_bytes",
+        "admin_chunk_min_bytes",
+        "admin_chunk_max_bytes",
+        "admin_chunked_max_upload_bytes",
+        "admin_chunked_upload_ttl_seconds",
+        "admin_chunked_cleanup_interval_seconds",
+        "admin_upload_owner_ttl_seconds",
+        "admin_chunked_max_active_tasks",
+        "admin_chunked_max_inflight_patches",
+        "admin_chunked_min_free_bytes",
         "admin_max_archive_members",
         "admin_max_archive_member_bytes",
         "admin_max_archive_total_bytes",
@@ -151,6 +175,20 @@ class Settings(BaseSettings):
                 "timeout, interval, size, count, and cache limits must be positive"
             )
         return value
+
+    @model_validator(mode="after")
+    def validate_chunked_limits(self) -> "Settings":
+        if not self.admin_chunk_min_bytes <= self.admin_chunk_recommended_bytes <= self.admin_chunk_max_bytes:
+            raise ValueError("chunk sizes must satisfy min <= recommended <= max")
+        if self.admin_chunked_max_upload_bytes < self.admin_chunk_max_bytes:
+            raise ValueError("ADMIN_CHUNKED_MAX_UPLOAD_BYTES must be at least ADMIN_CHUNK_MAX_BYTES")
+        if self.admin_chunked_max_upload_bytes > self.admin_max_archive_bytes:
+            raise ValueError("ADMIN_CHUNKED_MAX_UPLOAD_BYTES cannot exceed ADMIN_MAX_ARCHIVE_BYTES")
+        if self.admin_multipart_archive_max_bytes > self.admin_max_archive_bytes:
+            raise ValueError("ADMIN_MULTIPART_ARCHIVE_MAX_BYTES cannot exceed ADMIN_MAX_ARCHIVE_BYTES")
+        if self.admin_upload_owner_ttl_seconds < self.admin_chunked_upload_ttl_seconds:
+            raise ValueError("ADMIN_UPLOAD_OWNER_TTL_SECONDS cannot be shorter than ADMIN_CHUNKED_UPLOAD_TTL_SECONDS")
+        return self
 
     @field_validator("cache_rotate_percent")
     @classmethod

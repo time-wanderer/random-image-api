@@ -1,8 +1,8 @@
-# Random Image API V2.2 迁移手册
+# Random Image API V3.0.0 迁移手册
 
-本文覆盖三类迁移：V1→V2 原地升级、V2.0→V2.2 兼容升级，以及把 V2 连同永久数据迁移到新 VPS。V2.2 不改变 API 和 SQLite schema，重点增加响应式图片管理、独立 `square/` 目录、图片移动归档和更完整的标签编辑。
+本文覆盖旧版本原地升级到 V3.0.0，以及把服务与永久数据迁移到新 Linux VPS。V3.0.0 保持公开随机图片 API 兼容，并新增持久化可恢复网页分片上传。
 
-> 当前源码与 Docker Hub `qinlingmonkey/random-image-api:v2` 均为 V2.2.4，继续兼容 V2.2.3 的 API、SQLite schema 和数据目录。本补丁只调整管理端用户文案、错误提示和归档预览呈现，不迁移业务数据。升级会重启管理会话，管理员需要重新登录；尚未确认的归档 preview 需要重新上传并预览。发布镜像平台为 `linux/amd64`，Manifest/Registry 摘要为 `sha256:d00a6f75f028a913cb33062f80d9e3de68da6f82b4e88fb402b7cf64194257da`。
+> 当前工作区源码版本为 V3.0.0，尚未提交、推送或发布；当前 `v2` 发布镜像仍为 V2.2.4。升级前必须离线备份；V3 启动时会幂等升级 SQLite schema。
 
 ## 1. 数据边界
 
@@ -18,7 +18,7 @@
 - `data/logs/`；
 - Python 缓存、测试缓存、构建归档。
 
-官方备份脚本包含图库、SQLite 一致性副本和脱敏配置，不包含缓存与真实 Secret。
+官方备份脚本包含完整图库、SQLite 一致性副本和脱敏配置，不包含缓存、真实 Secret 或活动分片 `upload.bin`。Backup 与 Restore 都会 fail-closed 检查当前 Compose `api` 已停止；完整 Restore 归档必须同时包含 `data/images/` 与 `data/database/images.db`。
 
 ## 2. V1→V2 原地升级
 
@@ -27,6 +27,8 @@
 ```bash
 docker compose ps
 curl -fsS http://127.0.0.1:10086/health
+docker compose stop api
+docker compose ps --status running -q api
 ./scripts/backup.sh
 ```
 
@@ -129,6 +131,8 @@ docker compose up -d
 
 ```bash
 docker compose ps
+docker compose stop api
+docker compose ps --status running -q api
 ./scripts/backup.sh
 docker compose down
 sha256sum backups/backup-*.tar.gz
@@ -156,10 +160,14 @@ chmod 600 .env
 
 ```bash
 sha256sum -c /path/to/backup.sha256
+docker compose stop api
+docker compose ps --status running -q api
 RESTORE_CONFIRM=YES ./scripts/restore.sh /path/to/backup.tar.gz
 ```
 
-脚本恢复 `data/images/` 和 `data/database/`，清理 SQLite WAL/SHM 残留，并保留恢复前数据副本。WebDAV 缓存不恢复，服务会按需重建。
+脚本只接受同时具有 `data/images/` 和 `data/database/images.db` 的完整备份，恢复图库和数据库并清理 SQLite WAL/SHM 残留。Restore 会在暂存数据库中清空 `upload_tasks`，最终删除 `data/tmp/admin/chunked/`；若切换失败，图库、整个旧数据库目录和旧分片目录会一起回滚。WebDAV 缓存不恢复，服务会按需重建。
+
+Docker/Compose 不可用或状态查询失败时，脚本默认拒绝继续。只有已通过其他方式确认所有写入停止，才可分别使用 `BACKUP_OFFLINE_CONFIRMED=1` 或 `RESTORE_OFFLINE_CONFIRMED=1` 覆盖“无法探测”状态；确认 `api` 正在运行时不能覆盖。Restore 预检拒绝重复成员、链接、特殊文件和路径逃逸；默认最多 100000 个成员、单成员 1 GiB、总展开量 20 GiB。峰值空间按 `2 × 归档展开量 + 旧 live 数据量 + 256 MiB` 估算，覆盖暂存、新 live 副本和旧数据回滚副本。受信归档需要调整时，使用 `RESTORE_MAX_MEMBERS`、`RESTORE_MAX_MEMBER_BYTES`、`RESTORE_MAX_TOTAL_BYTES`、`RESTORE_FREE_SPACE_MARGIN_BYTES`；`RESTORE_EXPANDED_SPACE_FACTOR` 可提高展开量倍率，但不能低于 2。
 
 ### 3.4 构建、启动和验收
 
@@ -211,3 +219,14 @@ curl -fsS -X POST -H 'X-Admin-Token: <ADMIN_TOKEN>' \
 - [ ] 管理 UI 安全与写操作已抽查。
 - [ ] Hybrid 用户已验证第一层主题、同步、缓存和降级。
 - [ ] 回滚备份在验收结束前保留。
+
+
+## V2.2.4 → V3.0.0 分片上传迁移
+
+V3.0.0 将 SQLite `user_version` 升级为 3，并幂等创建 `upload_tasks`。原图片、标签、WebDAV 和缓存表不变，无需手工 SQL。升级前仍应运行标准备份；启动新版后检查数据库完整性并登录管理页面验证上传能力。
+
+V3.0.0 计划使用 Docker 镜像标签 `v3`；既有 `v1`、`v2` 镜像继续保留，用于兼容部署和回滚。当前 V3.0.0 仅为未发布源码，不应把现有 `v2` 当作已包含分片上传。
+
+新增配置见 `.env.example`。若沿用旧配置，程序使用 8 GiB 应用总上限、512 MiB 普通 multipart 上限、8 MiB 建议分片（遇到 `413` 自适应降为 4/2/1 MiB）、1–16 MiB 分片范围、24 小时 TTL、轻量单实例周期清理、最多 2 个活动任务和 2 个进程内并发 PATCH、256 MiB 最小剩余空间，以及 30 天上传所有者 Cookie TTL。有效 owner Cookie 临近过期时滚动续签，所有者 TTL 仍不能短于任务 TTL。上传临时空间按 `UPLOAD_TMP_DIR` 所在文件系统检查，图库导入按 `IMAGES_DIR` 所在文件系统检查，并扣除其他 receiving 任务尚承诺的字节；若两者使用不同挂载点，迁移前应分别规划容量。普通 multipart 跨文件系统复制时还需容纳 spool 与受控副本短时并存的峰值。
+
+活动 `upload.bin` 不进入标准备份。SQLite 一致性副本可能包含当时的 `upload_tasks` 行，因此 Restore 脚本会主动清空这些行并删除默认分片临时目录，使任务一致失效。原机只重建或重启容器、且完整保留同一 `data/` bind mount 时，任务可继续；同一浏览器需要保留签名上传所有者 Cookie、重新登录并重新选择同一文件。换浏览器、清 Cookie 或轮换 `ADMIN_SESSION_SECRET` 后不能接管旧任务。跨主机 Backup / Restore 前应先完成或取消活动任务。
