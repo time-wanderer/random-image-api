@@ -2,7 +2,7 @@
 
 本文覆盖旧版本原地升级到 V3.0.0，以及把服务与永久数据迁移到新 Linux VPS。V3.0.0 保持公开随机图片 API 兼容，并新增持久化可恢复网页分片上传。
 
-> 当前工作区源码版本为 V3.0.0，尚未提交、推送或发布；当前 `v2` 发布镜像仍为 V2.2.4。升级前必须离线备份；V3 启动时会幂等升级 SQLite schema。
+> V3.0.0 源码已同步 GitHub，Docker Hub 镜像为 `qinlingmonkey/random-image-api:v3`（`linux/amd64`）。升级前必须离线备份；V3 启动时会幂等升级 SQLite schema。
 
 ## 1. 数据边界
 
@@ -225,7 +225,7 @@ curl -fsS -X POST -H 'X-Admin-Token: <ADMIN_TOKEN>' \
 
 V3.0.0 将 SQLite `user_version` 升级为 3，并幂等创建 `upload_tasks`。原图片、标签、WebDAV 和缓存表不变，无需手工 SQL。升级前仍应运行标准备份；启动新版后检查数据库完整性并登录管理页面验证上传能力。
 
-V3.0.0 计划使用 Docker 镜像标签 `v3`；既有 `v1`、`v2` 镜像继续保留，用于兼容部署和回滚。当前 V3.0.0 仅为未发布源码，不应把现有 `v2` 当作已包含分片上传。
+V3.0.0 使用 Docker 镜像标签 `v3`；既有 `v1`、`v2` 镜像继续保留，用于兼容部署和回滚。Docker Hub `v3` 已发布并包含分片上传，不应把现有 `v2` 当作包含 V3 分片上传功能。
 
 新增配置见 `.env.example`。若沿用旧配置，程序使用 8 GiB 应用总上限、512 MiB 普通 multipart 上限、8 MiB 建议分片（遇到 `413` 自适应降为 4/2/1 MiB）、1–16 MiB 分片范围、24 小时 TTL、轻量单实例周期清理、最多 2 个活动任务和 2 个进程内并发 PATCH、256 MiB 最小剩余空间，以及 30 天上传所有者 Cookie TTL。有效 owner Cookie 临近过期时滚动续签，所有者 TTL 仍不能短于任务 TTL。上传临时空间按 `UPLOAD_TMP_DIR` 所在文件系统检查，图库导入按 `IMAGES_DIR` 所在文件系统检查，并扣除其他 receiving 任务尚承诺的字节；若两者使用不同挂载点，迁移前应分别规划容量。普通 multipart 跨文件系统复制时还需容纳 spool 与受控副本短时并存的峰值。
 

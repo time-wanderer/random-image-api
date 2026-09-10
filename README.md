@@ -1,10 +1,10 @@
-# Random Image API V3.0.0（未发布源码）
+# Random Image API V3.0.0
 
-> **V3.0.0 源码状态**：当前工作区新增持久化可恢复网页分片上传，尚未提交、推送或发布镜像。计划镜像标签为 `v3`；已发布的 `v1`、`v2` 镜像继续保留，其中 `v2` 当前仍为 V2.2.4。完整使用与运维说明见：[网页归档分片上传](docs/CHUNKED_UPLOAD.md)。
+> **V3.0.0 发布状态**：持久化可恢复网页分片上传已完成验收并发布。Docker Hub 镜像为 `qinlingmonkey/random-image-api:v3`；已发布的 `v1`、`v2` 镜像继续保留。完整使用与运维说明见：[网页归档分片上传](docs/CHUNKED_UPLOAD.md)。
 
 Random Image API V3.0.0 在 V2 能力上新增持久化可恢复网页分片上传，同时保留 `GET /random`、`?type=`、本地图库、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、主题标签和安全管理 UI。
 
-> 当前工作区源码版本为 V3.0.0，尚未提交、推送或发布；当前 `v2` 发布镜像仍为 V2.2.4。旧镜像的历史验收信息保留在实施记录中。
+> 当前源码和 Docker Hub `v3` 镜像均已发布。V3 镜像使用 `linux/amd64` 构建；旧镜像的历史验收信息保留在实施记录中。
 
 V1 快照见 [docs/V1.md](docs/V1.md)，V1 原地升级和 VPS 迁移见 [MIGRATION.md](MIGRATION.md)。
 
@@ -395,7 +395,7 @@ Docker Hub `v2` 已发布为 V2.2.4；独立回读确认 Manifest/Registry 摘�
 当前 V2 实施与验证记录见 [REPORT.md](REPORT.md)。
 
 
-## V3.0.0 可恢复网页分片上传（未发布源码）
+## V3.0.0 可恢复网页分片上传
 
 管理网页保留普通 multipart 小归档上传；超过服务端建议分片大小时使用顺序 offset 分片。浏览器先读取服务端 capabilities，默认建议 8 MiB，遇到 `413` 自动降为 4/2/1 MiB，总体进度只按服务端确认的 `Upload-Offset` 计算。任务状态持久化到 SQLite，单任务临时目录只含一个 `upload.bin`。页面刷新不会自动取得本地文件；同一浏览器重新登录后需要重新选择同一文件，页面才会按文件指纹和服务端 offset 继续。
 

@@ -1,14 +1,16 @@
-> 源码开发说明：V3.0.0 的持久化可恢复分片上传已在本地工作区实现，但本任务未提交、推送或发布。计划镜像标签为 `v3`；已有 `v1`、`v2` 均继续保留，Docker Hub `v2` 当前仍是 V2.2.4。
+> V3.0.0 的持久化可恢复分片上传已完成提交、GitHub 同步、远程隔离验收并发布到 Docker Hub。镜像标签为 `qinlingmonkey/random-image-api:v3`；已有 `v1`、`v2` 均继续保留。
 
-# Random Image API：Docker Hub 与 V2.2 部署说明
+# Random Image API：Docker Hub 与 V3.0.0 部署说明
 
 Random Image API V2 是 V1 的向后兼容扩展，增加 tags、多对多主题、主题随机接口和安全管理 UI，同时保留 V1 的 `/random`、本地/Hybrid、WebDAV 默认 90% 远程优先、缓存、importer 和 Backup / Restore。V2.2 继续兼容 V2.0 的 API 与数据库，重点改善管理网页、图片预览、目录整理和标签编辑体验。
 
 ## 发布状态（请先阅读）
 
-- **当前工作区源码版本**：V3.0.0（未发布）
-- **当前发布镜像版本**：V2.2.4，历史验收与 Registry 回读已完成
-- **当前发布镜像**：`qinlingmonkey/random-image-api:v2`
+- **当前工作区源码版本**：V3.0.0（已发布）
+- **当前发布镜像版本**：V3.0.0，已完成远程隔离验收与 Registry 回读
+- **当前发布镜像**：`qinlingmonkey/random-image-api:v3`
+- **V3.0.0 Manifest digest**：`sha256:a8951d587fd88e81af9ba25b4ab912a76cb29238ce8b72d406e7a80b4b34e6cd`
+- **V3.0.0 源码提交**：`69e1f0b27cfc241b86f3555f905faa25483e1b74`
 - **V2.2.4 验收状态**：完整测试为 `93 passed`，Node 上传校验测试通过；容器 `healthy`、版本 `2.2.4`、PID 1 UID `1000`，管理总览与归档预览的用户文案、结构化摘要、标签提示和内部信息隔离均通过 HTTP/HTML 合同检查
 - **平台**：`linux/amd64`
 - **V2.2.4 Manifest / Registry 摘要**：`sha256:d00a6f75f028a913cb33062f80d9e3de68da6f82b4e88fb402b7cf64194257da`
@@ -315,6 +317,6 @@ docker compose up -d
 
 ## 源码 V3.0.0：网页大归档分片上传
 
-未发布 V3 源码管理页保留普通 multipart 小归档上传，并为大归档提供服务端 capabilities、顺序 offset、断点恢复、默认 8 MiB 与 `413` 自适应降档、SQLite 任务持久化、取消操作和单 `upload.bin` 临时存储。`PATCH` 在读取 body 前执行同任务与进程级 in-flight admission，获准后直接逐块写入。进度只采用服务端确认 offset；刷新后需在同一浏览器重新选择同一文件。任务绑定独立签名上传所有者 Cookie，临近过期时保持 owner 身份滚动续签。完成上传后继续使用既有 importer dry-run、结构化预览和确认导入，确认成功后立即清理任务文件。
+V3 管理页保留普通 multipart 小归档上传，并为大归档提供服务端 capabilities、顺序 offset、断点恢复、默认 8 MiB 与 `413` 自适应降档、SQLite 任务持久化、取消操作和单 `upload.bin` 临时存储。`PATCH` 在读取 body 前执行同任务与进程级 in-flight admission，获准后直接逐块写入。进度只采用服务端确认 offset；刷新后需在同一浏览器重新选择同一文件。任务绑定独立签名上传所有者 Cookie，临近过期时保持 owner 身份滚动续签。完成上传后继续使用既有 importer dry-run、结构化预览和确认导入，确认成功后立即清理任务文件。
 
-上传与普通 multipart staging 按 `UPLOAD_TMP_DIR` 所在文件系统检查容量，确认导入按 `IMAGES_DIR` 所在文件系统检查，并保留其他 receiving 任务尚承诺的字节；跨文件系统 multipart 复制会先检查 spool 与受控副本短时并存的峰值。过期任务由启动、管理请求和轻量单实例周期任务清理。标准 Backup 不复制临时 `upload.bin`，Restore 会清空快照内 `upload_tasks` 并删除默认分片临时目录。默认参数及完整恢复边界见仓库 `docs/CHUNKED_UPLOAD.md`。计划发布为 `v3`，不会覆盖或删除 `v1`、`v2`；当前 Docker Hub `v2` 仍为 V2.2.4，以上 V3 功能尚未发布到任何现有镜像。
+上传与普通 multipart staging 按 `UPLOAD_TMP_DIR` 所在文件系统检查容量，确认导入按 `IMAGES_DIR` 所在文件系统检查，并保留其他 receiving 任务尚承诺的字节；跨文件系统 multipart 复制会先检查 spool 与受控副本短时并存的峰值。过期任务由启动、管理请求和轻量单实例周期任务清理。标准 Backup 不复制临时 `upload.bin`，Restore 会清空快照内 `upload_tasks` 并删除默认分片临时目录。默认参数及完整恢复边界见仓库 `docs/CHUNKED_UPLOAD.md`。Docker Hub `v3` 已发布，不覆盖或删除 `v1`、`v2`；V3 镜像包含上述分片上传功能。
