@@ -4,7 +4,7 @@
 
 本轮直接在项目工作区实现网页大归档分片上传，已完成提交、GitHub 同步、候选镜像构建、完整自动化测试和远程隔离运行态验收。Docker Hub 已发布 `qinlingmonkey/random-image-api:v3`，已有 `v1`、`v2` 镜像继续保留；以下内容记录 V3.0.0 的实现、验收和发布结果。
 
-发布结果：GitHub `main` 已同步提交 `55b48d2fee3e3e8b3586830f94b3f5b308f3bd3a`；随后使用包含批量管理和归档筛选修复的提交 `0a9b07bd55955d5df7489e1cee5f96577797c24e` 重新构建并覆盖 Docker Hub `qinlingmonkey/random-image-api:v3`。当前 Registry Manifest digest 为 `sha256:c8bf1ffcf92b390fcdfcd5852d8a2f1151cc923d4743e6c712327f5dd9a5c9d6`，Config digest 为 `sha256:f433ce15f0e58807a0661293d6423aecd837245ec3d7cbf66507df1e80fecb9b`，本地构建 ID 为 `sha256:f433ce15f0e58807a0661293d6423aecd837245ec3d7cbf66507df1e80fecb9b`，平台为 `linux/amd64`，版本为 `3.0.0`。此前旧镜像 Registry digest 为 `sha256:a8951d587fd88e81af9ba25b4ab912a76cb29238ce8b72d406e7a80b4b34e6cd`，现已被当前构建替换；远程隔离容器健康检查通过，实际 Uvicorn 进程以 UID 1000 运行。
+发布结果：GitHub `main` 已同步提交 `72e9f1289161fae4d535be3973214255f7a7f290`；随后使用该提交重新构建并覆盖 Docker Hub `qinlingmonkey/random-image-api:v3`。当前 Registry Manifest digest 为 `sha256:a21238785f4f8c6a9bb94457fe450276160ec2f9c2c9c6120634a9b532fcac0e`，远程候选镜像 ID 为 `sha256:7fd848c610a7a65cd32411e603e306c42b41ddeb13512b0590010c699a7bb6d2`，平台为 `linux/amd64`，版本为 `3.0.0`。本次远程隔离验收中健康检查通过，管理页面默认不显示直接删除表单，单图和批量删除均要求独立确认页、CSRF 和强制确认短语，实际 Uvicorn 进程以 UID 1000 运行。此前旧镜像 Registry digest 为 `sha256:c8bf1ffcf92b390fcdfcd5852d8a2f1151cc923d4743e6c712327f5dd9a5c9d6`，现已被当前构建替换。
 
 ## 技术选型与实现
 
