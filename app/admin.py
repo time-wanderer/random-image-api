@@ -962,6 +962,7 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
             f'<dt>来源</dt><dd>{_escape(row["source"])}</dd><dt>启用状态</dt><dd>{"启用" if row["enabled"] else "禁用"}</dd>'
             f'<dt>缓存状态</dt><dd>管理员受保护预览</dd><dt>更新时间</dt><dd>{_escape(row["updated_at"])}</dd></dl>'
             f'<section class="tags"><strong>完整标签</strong><div>{tags_html}</div></section>'
+            f'<p class="danger-zone"><a class="button danger" href="{admin_path}/images/{int(row["id"])}/delete-confirm">进入删除确认页</a></p>'
         )
 
     @router.get("/images/{image_id}/preview")
@@ -1053,13 +1054,12 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
                     related=conn.execute("SELECT t.slug,t.enabled FROM image_tags x JOIN tags t ON t.id=x.tag_id WHERE x.image_id=? ORDER BY t.slug",(iid,)).fetchall()
                     badges="".join(f'<span class="badge {_tag_color_class(str(x["slug"]))}{("" if x["enabled"] else " off")}">{_escape(x["slug"])}</span>' for x in related) or '<span class="muted">无标签</span>'
                     toggle=f'<form method="post" action="{admin_path}/images/{iid}/enabled">{hidden(session.csrf)}<input type="hidden" name="enabled" value="{1-int(row["enabled"])}"><button class="secondary">{"禁用" if row["enabled"] else "启用"}</button></form>'
-                    delete=f'<form method="post" action="{admin_path}/images/{iid}/delete" onsubmit="return confirm(\'确定删除本地原图？此操作不可撤销。\')">{hidden(session.csrf)}<input type="hidden" name="confirm" value="1"><button class="danger">删除本地原图</button></form>'
                     move=f'<form method="post" action="{admin_path}/images/{iid}/move">{hidden(session.csrf)}<select name="target" required><option value="desktop">desktop</option><option value="mobile">mobile</option><option value="square">square</option></select><button>移动归档</button></form>'
                     tags_form=f'<form method="post" action="{admin_path}/images/{iid}/tags"><span class="muted">添加或移除标签（可选）</span>{hidden(session.csrf)}<select name="tag_id" required><option value="">选择标签</option>{choices}</select><select name="action"><option value="add">添加标签</option><option value="remove">移除标签</option></select><button>更新标签</button></form>'
                     orientation_label = _escape(str(row["orientation"]))
                     status_class = "ok" if row["enabled"] else "off"
                     status_label = "启用" if row["enabled"] else "禁用"
-                    cards.append(f'<article class="card"><div class="preview-frame"><img loading="lazy" data-lightbox-src="{admin_path}/images/{iid}/preview" data-lightbox-alt="本地图片 #{iid}" src="{admin_path}/images/{iid}/preview" alt="本地图片 #{iid}"><div class="preview-overlay"><span class="badge">{orientation_label}</span><span class="badge {status_class}">{status_label}</span></div></div><div class="card-body"><label class="check"><input type="checkbox" data-batch-image form="batch-tags" name="image_ids" value="{iid}">选择 #{iid}</label><button type="button" class="link" data-detail-url="{admin_path}/images/{iid}/detail" aria-label="查看图片 {iid} 详情">查看详情</button><p class="path"><code>{rel}</code></p><div class="card-meta"><span class="badge">真实方向：{orientation_label}</span><span class="badge">存放目录：{_escape(group)}</span><span class="badge {status_class}">{status_label}</span></div><div class="tags"><span class="tags-label">标签</span>{badges}</div><div class="card-action-group shortcut-menu"><details><summary class="button secondary manage-entry" aria-label="打开图片快捷菜单">管理此图片</summary><div class="actions"><span class="muted">状态 / 标签 / 归档</span>{toggle}{move}{tags_form}</div></details></div><div class="card-action-group danger-zone"><details><summary>危险操作</summary><div class="actions"><span class="muted">危险操作</span>{delete}</div></details></div></div></article>')
+                    cards.append(f'<article class="card"><div class="preview-frame"><img loading="lazy" data-lightbox-src="{admin_path}/images/{iid}/preview" data-lightbox-alt="本地图片 #{iid}" src="{admin_path}/images/{iid}/preview" alt="本地图片 #{iid}"><div class="preview-overlay"><span class="badge">{orientation_label}</span><span class="badge {status_class}">{status_label}</span></div></div><div class="card-body"><label class="check"><input type="checkbox" data-batch-image form="batch-tags" name="image_ids" value="{iid}">选择 #{iid}</label><button type="button" class="link" data-detail-url="{admin_path}/images/{iid}/detail" aria-label="查看图片 {iid} 详情">查看详情</button><p class="path"><code>{rel}</code></p><div class="card-meta"><span class="badge">真实方向：{orientation_label}</span><span class="badge">存放目录：{_escape(group)}</span><span class="badge {status_class}">{status_label}</span></div><div class="tags"><span class="tags-label">标签</span>{badges}</div><div class="card-action-group shortcut-menu"><details><summary class="button secondary manage-entry" aria-label="打开图片快捷菜单">管理此图片</summary><div class="actions"><span class="muted">状态 / 标签 / 归档</span>{toggle}{move}{tags_form}</div></details></div></div></article>')
                 heading="本地图片"; listing="".join(cards)
         def opts(values: list[tuple[str,str]], current: str) -> str:
             return '<option value="">全部</option>'+''.join(f'<option value="{_escape(v)}"{" selected" if v==current else ""}>{_escape(label)}</option>' for v,label in values)
@@ -1073,7 +1073,7 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
         batch=""
         if source=="local":
             candidates=''.join(f'<option value="{int(x["id"])}">{_escape(x["display_name"])} — {_escape(x["slug"])}</option>' for x in all_tags if x["enabled"])
-            batch=f'<form class="panel form-grid floating-toolbar" id="batch-tags" data-batch-toolbar="1" method="post" action="{admin_path}/images/tags"><p class="muted">批量标签：可处理当前页勾选，或处理当前筛选条件下的全部本地图片。<span id="batch-count">请选择图片</span> <button type="button" class="secondary" data-batch-select="all">全选本页</button> <button type="button" class="secondary" data-batch-select="none">取消全选</button></p>{hidden(session.csrf)}<input type="hidden" name="orientation" value="{_escape(orientation)}"><input type="hidden" name="enabled" value="{_escape(enabled)}"><input type="hidden" name="storage" value="{_escape(storage)}"><input type="hidden" name="tag" value="{_escape(tag)}"><input type="hidden" name="q" value="{_escape(q)}"><label>批量标签<select name="tag_id" required><option value="">选择标签</option>{candidates}</select></label><label>操作<select name="action"><option value="add">添加标签到选中图片</option><option value="remove">从选中图片移除标签</option></select></label><button type="submit">应用到选中图片</button><button type="submit" name="all_filtered" value="1" onclick="return confirm(\'确定处理当前筛选结果中的全部本地图片？\')">应用到全部筛选结果</button></form><form class="panel form-grid danger-zone" method="post" action="{admin_path}/images/delete" onsubmit="return confirm(\'确定永久删除当前筛选结果中的全部本地图片？此操作不可撤销。\')">{hidden(session.csrf)}<input type="hidden" name="all_filtered" value="1"><input type="hidden" name="confirm" value="DELETE"><input type="hidden" name="orientation" value="{_escape(orientation)}"><input type="hidden" name="enabled" value="{_escape(enabled)}"><input type="hidden" name="storage" value="{_escape(storage)}"><input type="hidden" name="tag" value="{_escape(tag)}"><input type="hidden" name="q" value="{_escape(q)}"><strong>批量删除</strong><span class="muted">将删除当前筛选结果，不受分页数量限制。</span><button class="danger" type="submit">删除全部筛选结果</button></form>'
+            batch=f'<form class="panel form-grid floating-toolbar" id="batch-tags" data-batch-toolbar="1" method="post" action="{admin_path}/images/tags"><p class="muted">批量标签：可处理当前页勾选，或处理当前筛选条件下的全部本地图片。<span id="batch-count">请选择图片</span> <button type="button" class="secondary" data-batch-select="all">全选本页</button> <button type="button" class="secondary" data-batch-select="none">取消全选</button></p>{hidden(session.csrf)}<input type="hidden" name="orientation" value="{_escape(orientation)}"><input type="hidden" name="enabled" value="{_escape(enabled)}"><input type="hidden" name="storage" value="{_escape(storage)}"><input type="hidden" name="tag" value="{_escape(tag)}"><input type="hidden" name="q" value="{_escape(q)}"><label>批量标签<select name="tag_id" required><option value="">选择标签</option>{candidates}</select></label><label>操作<select name="action"><option value="add">添加标签到选中图片</option><option value="remove">从选中图片移除标签</option></select></label><button type="submit">应用到选中图片</button><button type="submit" name="all_filtered" value="1" onclick="return confirm(\'确定处理当前筛选结果中的全部本地图片？\')">应用到全部筛选结果</button></form><section class="panel danger-zone"><strong>批量删除</strong><p class="muted">删除属于高风险操作。请进入独立确认页，核对筛选条件和精确数量后再继续。</p><a class="button danger" href="{admin_path}/images/delete-confirm?{_escape(urlencode({k:v for k,v in filters.items() if k not in {"source","per_page","page"}}))}">进入批量删除确认页</a></section>'
         tag_summary = "无标签" if tag == _UNTAGGED_FILTER else (str(selected_tag["display_name"]) if selected_tag is not None else "全部标签")
         result = f'<section class="result-toolbar"><div><p class="eyebrow">图片库</p><h2>{_escape(heading)}</h2><p class="muted">当前条件：标签：{_escape(tag_summary)}</p><p class="muted">真实方向来自图片内容；存放目录只是文件所在的归档目录。</p><p class="muted">操作按状态、标签、归档分组；危险操作会要求确认。删除本地原图前会提示：确定删除本地原图？此操作不可撤销。</p></div><strong>筛选结果：{int(total)} 张</strong></section>'
         if not listing:
@@ -1148,11 +1148,56 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
             return _error_page("批量标签操作失败", str(exc) if isinstance(exc, (ValueError, LookupError)) else "标签操作无法完成")
         return _redirect(f"{admin_path}/images?source=local", "标签已更新")
 
+    @router.get("/images/delete-confirm", response_class=HTMLResponse)
+    def batch_delete_confirm(request: Request, orientation: str = "", enabled: str = "", storage: str = "", tag: str = "", q: str = "") -> HTMLResponse:
+        _sid, session = authenticate(request)
+        clauses = ["i.source='local'"]; args: list[object] = []
+        if orientation in {"desktop", "mobile", "square"}: clauses.append("i.orientation=?"); args.append(orientation)
+        if enabled in {"0", "1"}: clauses.append("i.enabled=?"); args.append(int(enabled))
+        if storage == "root": clauses.append("instr(i.rel_path,'/')=0")
+        elif storage in {"desktop", "mobile", "square"}: clauses.append("i.rel_path LIKE ? ESCAPE '\\'"); args.append(storage + "/%")
+        if tag == _UNTAGGED_FILTER: clauses.append("NOT EXISTS(SELECT 1 FROM image_tags x WHERE x.image_id=i.id)")
+        elif tag:
+            try: db.validate_slug(tag)
+            except ValueError: raise HTTPException(400, "标签筛选无效。")
+            clauses.append("EXISTS(SELECT 1 FROM image_tags x JOIN tags t ON t.id=x.tag_id WHERE x.image_id=i.id AND t.slug=? COLLATE NOCASE)"); args.append(tag)
+        if q: clauses.append("i.rel_path LIKE ? ESCAPE '\\'"); args.append(_like_pattern(q[:100]))
+        with db.get_conn(settings.database_path) as conn:
+            count = int(conn.execute("SELECT COUNT(*) FROM images i WHERE " + " AND ".join(clauses), args).fetchone()[0])
+        filters = {"orientation": orientation, "enabled": enabled, "storage": storage, "tag": tag, "q": q}
+        filter_text = "；".join(f"{k}={v or '全部'}" for k,v in filters.items())
+        body = (f'<section class="panel danger-zone"><h2>批量删除确认</h2><p>这是高风险操作，将永久删除当前筛选出的本地图片及其数据库记录。</p>'
+                f'<dl class="detail-grid"><dt>筛选条件</dt><dd>{_escape(filter_text)}</dd><dt>当前数量</dt><dd><strong>{count}</strong> 张</dd></dl>'
+                f'<form method="post" action="{admin_path}/images/delete">{hidden(session.csrf)}<input type="hidden" name="all_filtered" value="1">'
+                + ''.join(f'<input type="hidden" name="{_escape(k)}" value="{_escape(v)}">' for k,v in filters.items())
+                + f'<input type="hidden" name="confirm_count" value="{count}"><label>请输入确认短语 <input name="confirm_phrase" required autocomplete="off" placeholder="DELETE LOCAL IMAGES"></label><label>请输入确认数量 <input name="confirm_count_check" required inputmode="numeric" pattern="[0-9]+" placeholder="{count}"></label><button class="danger" type="submit">永久删除 {count} 张本地图片</button></form>'
+                f'<p><a class="button secondary" href="{admin_path}/images?source=local">取消并返回图片库</a></p></section>')
+        return _page("批量删除确认", body, session.csrf, page_nav("images", session.csrf))
+
+    @router.get("/images/{image_id}/delete-confirm", response_class=HTMLResponse)
+    def single_delete_confirm(image_id: int, request: Request) -> HTMLResponse:
+        _sid, session = authenticate(request)
+        with db.get_conn(settings.database_path) as conn:
+            row = conn.execute("SELECT id,rel_path,source FROM images WHERE id=?", (image_id,)).fetchone()
+        if row is None or row["source"] != "local": raise HTTPException(404, "本地图片不存在")
+        rel = str(row["rel_path"])
+        body = (f'<section class="panel danger-zone"><h2>删除单张图片确认</h2><p>这是高风险操作，将永久删除本地图片及其数据库标签关系。</p>'
+                f'<p>图片 ID：<strong>{image_id}</strong></p><p>文件名：<code>{_escape(Path(rel).name)}</code></p>'
+                f'<form method="post" action="{admin_path}/images/{image_id}/delete">{hidden(session.csrf)}<input type="hidden" name="expected_path" value="{_escape(rel)}"><label>请输入图片 ID <input name="confirm_image_id" required inputmode="numeric"></label><label>请输入确认短语 <input name="confirm_phrase" required autocomplete="off" placeholder="DELETE LOCAL IMAGE"></label><button class="danger" type="submit">永久删除这张图片</button></form>'
+                f'<p><a class="button secondary" href="{admin_path}/images?source=local">取消并返回图片库</a></p></section>')
+        return _page("单图删除确认", body, session.csrf, page_nav("images", session.csrf))
+
     @router.post("/images/delete")
     async def batch_delete_images(request: Request):
         _sid, _session, form = await write_auth(request)
-        if str(form.get("confirm", "")) not in {"1", "DELETE"}:
-            raise HTTPException(400, "请确认后再删除图片。")
+        if str(form.get("confirm_phrase", "")) != "DELETE LOCAL IMAGES":
+            raise HTTPException(400, "请输入 DELETE LOCAL IMAGES 以确认批量删除。")
+        try:
+            expected_count = int(str(form.get("confirm_count", "-1")))
+        except ValueError:
+            raise HTTPException(400, "确认数量无效。")
+        if str(form.get("confirm_count_check", "")) != str(expected_count):
+            raise HTTPException(400, "请输入页面显示的准确确认数量。")
         try:
             ids = {int(value) for value in form.getlist("image_ids") if str(value).isdigit()}
             if str(form.get("all_filtered", "")) == "1":
@@ -1185,6 +1230,8 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
                     args.append(_like_pattern(q))
                 with db.get_conn(settings.database_path) as lookup:
                     ids = {int(row[0]) for row in lookup.execute("SELECT i.id FROM images i WHERE " + " AND ".join(clauses), args)}
+            if expected_count != len(ids):
+                raise HTTPException(409, "筛选结果数量已变化，请返回确认页重新核对。")
             if not ids:
                 raise ValueError("当前筛选条件下没有可删除的本地图片")
             images_root = Path(settings.images_dir).resolve()
@@ -1481,9 +1528,11 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
     @router.post("/images/{image_id}/delete")
     async def delete_image(image_id: int, request: Request):
         _sid, _session, form = await write_auth(request)
-        confirmation = str(form.get("confirm", ""))
-        if confirmation not in {"1", "DELETE"}:
-            raise HTTPException(400, "请确认后再删除图片。")
+        if str(form.get("confirm_phrase", "")) != "DELETE LOCAL IMAGE":
+            raise HTTPException(400, "请输入 DELETE LOCAL IMAGE 以确认删除。")
+        if str(form.get("confirm_image_id", "")) != str(image_id):
+            raise HTTPException(400, "请输入正确的图片 ID 以确认删除。")
+        supplied_path = str(form.get("expected_path", ""))
         quarantined: Path | None = None
         target: Path | None = None
         try:
@@ -1495,6 +1544,8 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
                     raise HTTPException(404, "图片不存在")
                 if row["source"] != "local":
                     raise HTTPException(400, "只能删除本地图片。")
+                if supplied_path != str(row["rel_path"]):
+                    raise HTTPException(409, "图片位置已变化，请重新打开确认页。")
                 target = _safe_db_file(settings.images_dir, str(row["rel_path"]))
                 quarantined = target.with_name(f".{target.name}.{secrets.token_hex(8)}.deleting")
                 os.replace(target, quarantined)

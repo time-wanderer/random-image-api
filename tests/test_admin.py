@@ -215,9 +215,16 @@ def test_multi_upload_exif_hash_dedup_and_local_delete_confirmation(admin_env) -
 
         image_id = int(rows[0]["id"])
         rel_path = str(rows[0]["rel_path"])
-        assert client.post(f"{ADMIN}/images/{image_id}/delete", data={"csrf": csrf, "confirm": "delete"}).status_code == 400
+        assert client.post(f"{ADMIN}/images/{image_id}/delete", data={"csrf": csrf, "confirm": "DELETE"}).status_code == 400
         assert (settings.images_dir / rel_path).is_file()
-        assert client.post(f"{ADMIN}/images/{image_id}/delete", data={"csrf": csrf, "confirm": "DELETE"}, follow_redirects=False).status_code == 303
+        confirmation = client.get(f"{ADMIN}/images/{image_id}/delete-confirm")
+        assert confirmation.status_code == 200
+        assert "DELETE LOCAL IMAGE" in confirmation.text
+        assert client.post(
+            f"{ADMIN}/images/{image_id}/delete",
+            data={"csrf": csrf, "confirm_phrase": "DELETE LOCAL IMAGE", "confirm_image_id": str(image_id), "expected_path": rel_path},
+            follow_redirects=False,
+        ).status_code == 303
         assert not (settings.images_dir / rel_path).exists()
         with db.get_conn(settings.database_path) as conn:
             assert conn.execute("SELECT 1 FROM images WHERE id=?", (image_id,)).fetchone() is None
@@ -617,12 +624,15 @@ def test_v21_move_conflict_single_tags_and_friendly_delete(admin_env) -> None:
         ).status_code == 303
 
         page = client.get(f"{ADMIN}/images?source=local")
-        assert 'onsubmit="return confirm(' in page.text
-        assert 'name="confirm" value="1"' in page.text
-        assert "输入 DELETE" not in page.text
+        assert 'action="/manage-images/images/' + str(image_id) + '/delete"' not in page.text
+        assert "危险操作</summary>" not in page.text
+        assert f"/images/{image_id}/detail" in page.text
+        assert f"/images/{image_id}/delete-confirm" not in page.text
+        confirmation = client.get(f"{ADMIN}/images/{image_id}/delete-confirm")
+        assert confirmation.status_code == 200
         assert client.post(
             f"{ADMIN}/images/{image_id}/delete",
-            data={"csrf": csrf, "confirm": "1"},
+            data={"csrf": csrf, "confirm_phrase": "DELETE LOCAL IMAGE", "confirm_image_id": str(image_id), "expected_path": str(updated["rel_path"])},
             follow_redirects=False,
         ).status_code == 303
         assert not (settings.images_dir / str(updated["rel_path"])).exists()
@@ -786,7 +796,9 @@ def test_admin_ux_information_architecture_and_responsive_contract(admin_env) ->
         assert "overflow-x:hidden" in images
         assert "nav.main-nav{flex-wrap:nowrap;overflow-x:auto" in images
         assert all(text in images for text in ("主导航", "总览", "图片库", "标签工作台", "退出", "快速筛选", "高级筛选", "batch-tags", "name=\"tag_id\"", "name=\"q\""))
-        assert "确定删除本地原图？此操作不可撤销。" in images
+        assert "批量删除确认" in images
+        assert "危险操作会要求确认" in images
+        assert "name=\"confirm\" value=\"1\"" not in images
         assert all(text in overview for text in ("主导航", "总览", "图片库", "标签工作台", "退出", "id=\"upload\"", "name=\"files\"", "name=\"archive\""))
         assert all(text in tags for text in ("主导航", "总览", "图片库", "标签工作台", "退出", "id=\"create-tag\"", "name=\"display_name\"", "name=\"slug\""))
 
@@ -803,7 +815,7 @@ def test_admin_ux_information_architecture_and_responsive_contract(admin_env) ->
         assert "请选择图片" in images
         assert "count?'已选择 '+count+' 张图片':'请选择图片'" in images
         assert 'onsubmit="return confirm(' in images
-        assert 'name="confirm" value="1"' in images
+        assert 'action="/manage-images/images/delete"' not in images
         assert 'name="target" required' in images
         assert 'data-batch-image form="batch-tags" name="image_ids"' in images
         assert "function refreshBatchSelection()" in images
@@ -1741,11 +1753,34 @@ def test_batch_delete_cascades_image_tags_and_removes_files(admin_env) -> None:
         with db.get_conn(settings.database_path) as conn:
             assert int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]) == 2
             assert int(conn.execute("SELECT COUNT(*) FROM image_tags").fetchone()[0]) == 2
+        confirmation = client.get(
+            f"{ADMIN}/images/delete-confirm?source=local&orientation=desktop&enabled=1&tag=cleanup"
+        )
+        assert confirmation.status_code == 200
+        assert "当前数量" in confirmation.text
+        assert client.post(
+            f"{ADMIN}/images/delete",
+            data={
+                "csrf": csrf,
+                "confirm_phrase": "not the phrase",
+                "confirm_count": "2",
+                "confirm_count_check": "2",
+                "all_filtered": "1",
+                "orientation": "desktop",
+                "enabled": "1",
+                "storage": "",
+                "tag": "cleanup",
+                "q": "",
+            },
+            follow_redirects=False,
+        ).status_code == 400
         response = client.post(
             f"{ADMIN}/images/delete",
             data={
                 "csrf": csrf,
-                "confirm": "DELETE",
+                "confirm_phrase": "DELETE LOCAL IMAGES",
+                "confirm_count": "2",
+                "confirm_count_check": "2",
                 "all_filtered": "1",
                 "orientation": "desktop",
                 "enabled": "1",
