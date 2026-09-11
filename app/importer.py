@@ -255,6 +255,13 @@ def _inspect_image(payload: bytes, max_pixels: int) -> tuple[str, int, int]:
         raise ArchiveSecurityError(f"Pillow decompression-bomb limit exceeded: {exc}") from exc
 
 
+def member_identity(index: int, member: _Member) -> str:
+    """Return a stable opaque identifier for one validated archive member."""
+    compressed = "" if member.compressed_size is None else str(member.compressed_size)
+    material = f"{index}\0{member.name}\0{member.size}\0{compressed}".encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
+
+
 def _orientation(width: int, height: int) -> str:
     if width > height:
         return "desktop"
@@ -302,6 +309,7 @@ def import_archive(
     square_policy: SquarePolicy = "both",
     limits: ImportLimits | None = None,
     archive_suffix: str | None = None,
+    excluded_member_ids: set[str] | None = None,
 ) -> ImportSummary:
     """Validate and import supported images from a ZIP or gzip-compressed TAR."""
     if square_policy not in {"both", "desktop", "mobile"}:
@@ -321,6 +329,7 @@ def import_archive(
     staged: list[tuple[Path, Path]] = []
     staging: Path | None = None
     seen: set[tuple[str, str]] = set()
+    excluded_member_ids = set(excluded_member_ids or ())
 
     try:
         try:
@@ -338,8 +347,8 @@ def import_archive(
                 staging = Path(tempfile.mkdtemp(prefix=".import-staging-", dir=destination))
 
             total_read = 0
-            for member in members:
-                summary.files_examined += 1
+            for member_index, member in enumerate(members):
+                member_id = member_identity(member_index, member)
                 try:
                     if kind == "zip":
                         stream = archive.open(member.source, "r")
@@ -356,9 +365,14 @@ def import_archive(
                 try:
                     detected, width, height = _inspect_image(payload, limits.max_image_pixels)
                 except (UnidentifiedImageError, OSError, ValueError, SyntaxError):
-                    summary.skipped += 1
+                    if member_id not in excluded_member_ids:
+                        summary.files_examined += 1
+                        summary.skipped += 1
                     continue
 
+                if member_id in excluded_member_ids:
+                    continue
+                summary.files_examined += 1
                 orientation = _orientation(width, height)
                 setattr(summary, orientation, getattr(summary, orientation) + 1)
                 target_group = _destination_orientation(orientation, square_policy)

@@ -2,21 +2,21 @@
 
 > **V3.0.0 发布状态**：持久化可恢复网页分片上传已完成验收并发布。Docker Hub 镜像为 `qinlingmonkey/random-image-api:v3`；已发布的 `v1`、`v2` 镜像继续保留。完整使用与运维说明见：[网页归档分片上传](docs/CHUNKED_UPLOAD.md)。
 
-Random Image API V3.0.0 在 V2 能力上新增持久化可恢复网页分片上传，同时保留 `GET /random`、`?type=`、本地图库、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、主题标签和安全管理 UI。
+Random Image API V3.0.0 在既有 V1/V2 能力上新增持久化可恢复网页分片上传，同时保留 `GET /random`、`?type=`、本地图库、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、主题标签和安全管理 UI。
 
 > 当前源码和 Docker Hub `v3` 镜像均已发布。V3 镜像使用 `linux/amd64` 构建；旧镜像的历史验收信息保留在实施记录中。
 
 V1 快照见 [docs/V1.md](docs/V1.md)，V1 原地升级和 VPS 迁移见 [MIGRATION.md](MIGRATION.md)。
 
-## 1. V2 与 V2.2 能力
+## 1. V3.0.0 能力概览
 
 - `tags` 主题模型：一张本地图片或一个 WebDAV 对象可关联多个标签，多对多关系不会复制图片文件。
 - `GET /random/{slug}` 与 `GET /random?tag={slug}`：按主题随机返回图片。
 - 严格主题语义：未知、禁用或非法标签返回 `404`；标签存在但没有可用图片也返回 `404`；数据库不可用或无法安全降级的远端故障返回 `503`。
 - WebDAV 第一层主题：在 `desktop/`、`mobile/` 下的第一层子目录名可作为标签提示，例如 `desktop/anime/a.jpg` 对应 `anime`。
 - 浏览器管理 UI：响应式统计卡片、图片瀑布流、受保护预览、标签管理、多图上传、移动归档、友好删除确认、WebDAV 对象启停与标签维护、缓存清理、归档 preview-confirm。
-- V2.2 独立使用 `data/images/square/` 保存正方形图片；`SQUARE_POLICY` 只决定正方形图片进入哪些随机池，不再决定物理存放目录。
-- SQLite V1→V2 幂等原地迁移：启动时创建标签关系表并补充新字段，原有未打标签图片仍可由 `GET /random` 使用。
+- V3.0.0 独立使用 `data/images/square/` 保存正方形图片；`SQUARE_POLICY` 只决定正方形图片进入哪些随机池，不再决定物理存放目录。
+- SQLite V1/V2→V3 幂等原地迁移：启动时创建标签关系表并补充新字段，原有未打标签图片仍可由 `GET /random` 使用。
 
 ## 2. 架构与数据
 
@@ -34,7 +34,7 @@ Client
 
 标签 slug 只允许 1–63 位小写字母、数字和单连字符，不能使用保留路由名。显示名称与 slug 分离。`images ↔ tags`、`webdav_objects ↔ tags` 都是多对多关系。
 
-## 3. 部署 V2
+## 3. 部署 V3.0.0
 
 要求：Linux、Docker Engine、Docker Compose Plugin。
 
@@ -54,7 +54,7 @@ cp .env.example .env
 ```yaml
 services:
   api:
-    image: qinlingmonkey/random-image-api:v2
+    image: qinlingmonkey/random-image-api:v3
     restart: unless-stopped
     ports:
       - "10086:10086"
@@ -75,7 +75,7 @@ services:
 只需生成两个不同的管理 Secret 并写入 `.env`：
 
 ```bash
-sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=v2/" .env
+sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=v3/" .env
 sed -i "s/^IMAGE_NAME=.*/IMAGE_NAME=qinlingmonkey\\/random-image-api/" .env
 sed -i "s/^ADMIN_TOKEN=.*/ADMIN_TOKEN=$(openssl rand -hex 32)/" .env
 sed -i "s/^ADMIN_SESSION_SECRET=.*/ADMIN_SESSION_SECRET=$(openssl rand -hex 32)/" .env
@@ -166,7 +166,7 @@ curl -D headers.txt -o image.bin 'http://127.0.0.1:10086/random?type=mobile'
 
 未传 `type` 时按 User-Agent 识别；显式 `desktop` / `mobile` 优先。响应头包含方向、尺寸、来源、方向回退、远端降级和标签等信息。
 
-### 4.3 V2 主题接口
+### 4.3 V3 主题接口
 
 以下两种写法等价：
 
@@ -203,7 +203,7 @@ data/images/mobile/
 data/images/square/
 ```
 
-程序始终以图片真实宽高分类；`desktop/`、`mobile/`、`square/` 是物理归档目录，便于人工整理，不会覆盖真实方向。V2.2 上传和归档 importer 会把正方形图片保存到 `square/`。旧版本中位于根目录、`desktop/` 或 `mobile/` 的正方形图片仍兼容，不会被强制移动。等待周期扫描，或配置 `ADMIN_TOKEN` 后触发：
+程序始终以图片真实宽高分类；`desktop/`、`mobile/`、`square/` 是物理归档目录，便于人工整理，不会覆盖真实方向。V3.0.0 上传和归档 importer 会把正方形图片保存到 `square/`。旧版本中位于根目录、`desktop/` 或 `mobile/` 的正方形图片仍兼容，不会被强制移动。等待周期扫描，或配置 `ADMIN_TOKEN` 后触发：
 
 ```bash
 curl -fsS -X POST \
@@ -237,7 +237,7 @@ python -m app.importer /tmp/photos.tar.gz \
 
 也可直接把图片复制到 `data/images/{desktop,mobile,square}/` 后触发 `POST /admin/rescan`。目录标签映射来自归档成员的父目录，网页预览页可复核修改；网页上传前选择的标签应用于本次所有图片。
 
-Importer 会先验证归档成员、路径、大小和压缩比，再识别真实图片格式、方向并按内容去重。文件提交或 SQLite 标签事务失败时，会撤销本次新建文件；导入前已存在的重复图片不会被删除。V2 管理 UI 提供更安全易用的 preview-confirm 流程，见下文。
+Importer 会先验证归档成员、路径、大小和压缩比，再识别真实图片格式、方向并按内容去重。文件提交或 SQLite 标签事务失败时，会撤销本次新建文件；导入前已存在的重复图片不会被删除。V3 管理 UI 提供更安全易用的 preview-confirm 流程，见下文。
 
 ## 6. WebDAV Hybrid
 
@@ -267,7 +267,7 @@ mobile/
     └── tall.png
 ```
 
-V2 读取 `desktop/`、`mobile/` 下**第一层子目录**作为主题提示；更深层目录不会产生额外层级标签。远端同步只更新轻量索引，图片在命中时按需下载。
+V3 读取 `desktop/`、`mobile/` 下**第一层子目录**作为主题提示；更深层目录不会产生额外层级标签。远端同步只更新轻量索引，图片在命中时按需下载。
 
 `HYBRID_REMOTE_PROBABILITY=0.9` 保留 V1 的 90% 远程优先策略。远端失败时按当前方向尝试缓存和本地图库，必要时再做方向回退；没有候选且远端状态不可靠时返回 `503`。
 
@@ -317,13 +317,13 @@ ADMIN_PAGE_SIZE=20
 
 1. **瀑布流浏览**：本地图片以响应式卡片展示并使用浏览器懒加载；预览只能在管理员登录会话中访问，不暴露宿主机文件路径。当前直接传输原图供预览，不额外生成缩略图，超大原图较多时会增加浏览器流量。
 2. **方向与目录**：卡片分别显示“真实方向”和“存放目录”。管理员可把本地原图移动到 `desktop`、`mobile` 或 `square`，移动只改变归档位置，不伪造图片方向；同名冲突会生成安全的新文件名。
-3. **标签**：创建、编辑、启用/禁用、合并；每张本地图片和 WebDAV 对象均可直接添加或移除标签，本地图片还支持勾选后批量添加/移除。一张图可关联多个标签而不复制文件。
+3. **标签**：创建、编辑、启用/禁用、合并；每张本地图片和 WebDAV 对象均可直接添加或移除标签。本地图片支持按当前筛选结果跨分页批量添加/移除，不受每页数量限制。一张图可关联多个标签而不复制文件。
 4. **上传**：支持单图和多图上传，验证格式、像素和大小，按内容哈希去重，并按真实方向保存；正方形图片进入 `square/`。
-5. **删除**：点击“删除本地原图”后由浏览器二次确认，页面不再要求手写 `DELETE`；服务端仍要求明确确认字段和 CSRF。WebDAV 只允许禁用、维护标签或清理本地缓存，绝不远程删除原图。
+5. **删除**：点击“删除本地原图”后由浏览器二次确认，页面不再要求手写 `DELETE`；支持按当前筛选结果跨分页批量删除本地图片。删除图片记录时，SQLite 通过 `ON DELETE CASCADE` 清理 `image_tags` 关系，但保留标签定义；服务端仍要求明确确认字段和 CSRF。WebDAV 只允许禁用、维护标签或清理本地缓存，绝不远程删除原图。
 6. **WebDAV 预览**：已有本地缓存的远端对象可以预览；未缓存对象显示占位卡片，打开管理页不会批量下载远端原图。
 7. **筛选**：可按来源、真实方向、存放目录、启用状态、缓存状态、标签和文件名/HREF 筛选，并选择每页数量。标签筛选提供“全部标签”“无标签”和用户创建标签；“无标签”表示不存在任何标签关系，因此关联了停用标签的图片不算无标签，并可与其他筛选、排序和分页组合。
 8. **缓存**：可运行维护或清空 WebDAV 缓存；缓存可重建，不是永久图库。
-9. **归档**：只接受 ZIP、TAR.GZ、TGZ。先上传到 preview，系统执行完整安全校验和 dry-run；核对摘要、上传前选择的多标签及归档成员父目录映射后再 confirm。上传前标签应用于本次所有图片，空表示不加标签。普通 multipart preview 绑定当前 Session；持久分片 preview 绑定签名上传所有者 Cookie，并受 24 小时任务 TTL 约束。
+9. **归档**：只接受 ZIP、TAR.GZ、TGZ。先上传到 preview，系统执行完整安全校验和 dry-run；预览页支持搜索和逐项排除图片，排除项仍完成安全检查但不会导入、占用导入容量或获得本次标签；核对摘要、上传前选择的多标签及归档成员父目录映射后再 confirm。上传前标签应用于本次所有图片，空表示不加标签。普通 multipart preview 绑定当前 Session；持久分片 preview 绑定签名上传所有者 Cookie，并受 24 小时任务 TTL 约束。
 
 ## 8. 环境变量
 

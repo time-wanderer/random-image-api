@@ -1,4 +1,4 @@
-"""Server-rendered administration UI for Random Image API V2.
+"""Server-rendered administration UI for Random Image API V3.
 
 Integration::
 
@@ -173,7 +173,7 @@ class _Preview:
     archive_size: int
     archive_sha256: str
     summary: dict[str, object]
-    entries: list[tuple[str, str]]  # (sha256, directory-derived slug)
+    entries: list[dict[str, object]]
     selected_default_tag: str
     selected_tags: tuple[str, ...]
     persistent: bool = False
@@ -344,7 +344,7 @@ document.addEventListener('click',function(e){var layer=e.target.closest('.light
 document.addEventListener('keydown',function(e){if(e.key==='Escape'){closeLayer(document.getElementById('image-lightbox'));closeLayer(document.getElementById('image-detail-drawer'));}});
 var initialBatch=document.querySelector('[data-batch-toolbar]');if(initialBatch)initialBatch.hidden=true;var z=document.querySelector('[data-drop-zone]'),i=document.querySelector('[data-drop-input]');if(z&&i){['dragenter','dragover'].forEach(function(n){z.addEventListener(n,function(e){e.preventDefault();z.classList.add('is-dragging');});});['dragleave','drop'].forEach(function(n){z.addEventListener(n,function(e){e.preventDefault();z.classList.remove('is-dragging');});});z.addEventListener('drop',function(e){if(e.dataTransfer.files.length){i.files=e.dataTransfer.files;i.dispatchEvent(new Event('change',{bubbles:true}));}});}
 });})();</script>"""
-    return HTMLResponse("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"+f"{token}<title>{_escape(title)}</title>{style}</head><body><header><div class=\"appbar\"><div class=\"brand\"><span class=\"brand-mark\" aria-hidden=\"true\">R</span><div><h1>{_escape(title)}</h1><span class=\"version\">Random Image API · 管理端 · V2</span></div></div><div class=\"user-actions\">{nav}</div></div></header><main>{body}</main></body></html>")
+    return HTMLResponse("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"+f"{token}<title>{_escape(title)}</title>{style}</head><body><header><div class=\"appbar\"><div class=\"brand\"><span class=\"brand-mark\" aria-hidden=\"true\">R</span><div><h1>{_escape(title)}</h1><span class=\"version\">Random Image API · 管理端 · V3.0.0</span></div></div><div class=\"user-actions\">{nav}</div></div></header><main>{body}</main></body></html>")
 
 
 def _error_page(title: str, message: str, status_code: int = 400) -> HTMLResponse:
@@ -404,19 +404,19 @@ def _archive_entries(
     path: Path,
     limits: importer.ImportLimits,
     archive_suffix: str | None = None,
-) -> list[tuple[str, str]]:
-    """Return image hashes/tag hints after importer-owned archive validation."""
+) -> list[dict[str, object]]:
+    """Return validated, stable per-member preview records.
+
+    The legacy ``[digest, hint]`` representation is accepted by
+    ``_normalize_entries`` when restoring persisted previews.
+    """
     archive_size = path.stat().st_size
     archive, kind = importer._open_archive(path, archive_suffix)
-    entries: list[tuple[str, str]] = []
+    entries: list[dict[str, object]] = []
     with archive:
-        members = (
-            importer._zip_members(archive, limits, archive_size)
-            if kind == "zip"
-            else importer._tar_members(archive, limits, archive_size)
-        )
+        members = importer._zip_members(archive, limits, archive_size) if kind == "zip" else importer._tar_members(archive, limits, archive_size)
         total = 0
-        for member in members:
+        for index, member in enumerate(members):
             stream = archive.open(member.source, "r") if kind == "zip" else archive.extractfile(member.source)
             if stream is None:
                 raise importer.ArchiveSecurityError(f"cannot read archive member: {member.name!r}")
@@ -424,13 +424,35 @@ def _archive_entries(
                 payload = importer._read_limited(stream, member, total, limits)
             total += len(payload)
             try:
-                importer._inspect_image(payload, limits.max_image_pixels)
+                detected, width, height = importer._inspect_image(payload, limits.max_image_pixels)
             except (UnidentifiedImageError, OSError, ValueError, SyntaxError):
                 continue
             parent = PurePosixPath(member.name).parent
             hint = "" if str(parent) == "." else _slugify(parent.parts[-1])
-            entries.append((hashlib.sha256(payload).hexdigest(), hint))
+            entries.append({
+                "id": importer.member_identity(index, member), "name": member.name,
+                "sha256": hashlib.sha256(payload).hexdigest(), "width": width,
+                "height": height, "orientation": importer._orientation(width, height),
+                "format": detected.lower(), "size": len(payload), "hint": hint,
+            })
     return entries
+
+
+def _normalize_entries(raw: object) -> list[dict[str, object]]:
+    """Normalize current structured and older tuple preview records."""
+    result: list[dict[str, object]] = []
+    if not isinstance(raw, list):
+        return result
+    for index, item in enumerate(raw):
+        if isinstance(item, dict):
+            record = dict(item)
+            if all(key in record for key in ("id", "name", "sha256", "orientation", "size")):
+                result.append(record)
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            digest, hint = item
+            result.append({"id": str(digest), "name": str(digest), "sha256": str(digest), "hint": str(hint), "width": 0, "height": 0, "orientation": "unknown", "format": "", "size": 0})
+    return result
+
 
 
 def _selected_tag_slugs(form: Any) -> list[str]:
@@ -1051,7 +1073,7 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
         batch=""
         if source=="local":
             candidates=''.join(f'<option value="{int(x["id"])}">{_escape(x["display_name"])} — {_escape(x["slug"])}</option>' for x in all_tags if x["enabled"])
-            batch=f'<form class="panel form-grid floating-toolbar" id="batch-tags" data-batch-toolbar="1" method="post" action="{admin_path}/images/tags"><p class="muted">批量标签：先勾选图片，再选择标签和操作。<span id="batch-count">请选择图片</span> <button type="button" class="secondary" data-batch-select="all">全选</button> <button type="button" class="secondary" data-batch-select="none">取消全选</button></p>{hidden(session.csrf)}<label>批量标签<select name="tag_id" required><option value="">选择标签</option>{candidates}</select></label><label>操作<select name="action"><option value="add">添加标签</option><option value="remove">移除标签</option></select></label><button type="submit">应用到选中图片</button></form>'
+            batch=f'<form class="panel form-grid floating-toolbar" id="batch-tags" data-batch-toolbar="1" method="post" action="{admin_path}/images/tags"><p class="muted">批量标签：可处理当前页勾选，或处理当前筛选条件下的全部本地图片。<span id="batch-count">请选择图片</span> <button type="button" class="secondary" data-batch-select="all">全选本页</button> <button type="button" class="secondary" data-batch-select="none">取消全选</button></p>{hidden(session.csrf)}<input type="hidden" name="orientation" value="{_escape(orientation)}"><input type="hidden" name="enabled" value="{_escape(enabled)}"><input type="hidden" name="storage" value="{_escape(storage)}"><input type="hidden" name="tag" value="{_escape(tag)}"><input type="hidden" name="q" value="{_escape(q)}"><label>批量标签<select name="tag_id" required><option value="">选择标签</option>{candidates}</select></label><label>操作<select name="action"><option value="add">添加标签到选中图片</option><option value="remove">从选中图片移除标签</option></select></label><button type="submit">应用到选中图片</button><button type="submit" name="all_filtered" value="1" onclick="return confirm(\'确定处理当前筛选结果中的全部本地图片？\')">应用到全部筛选结果</button></form><form class="panel form-grid danger-zone" method="post" action="{admin_path}/images/delete" onsubmit="return confirm(\'确定永久删除当前筛选结果中的全部本地图片？此操作不可撤销。\')">{hidden(session.csrf)}<input type="hidden" name="all_filtered" value="1"><input type="hidden" name="confirm" value="DELETE"><input type="hidden" name="orientation" value="{_escape(orientation)}"><input type="hidden" name="enabled" value="{_escape(enabled)}"><input type="hidden" name="storage" value="{_escape(storage)}"><input type="hidden" name="tag" value="{_escape(tag)}"><input type="hidden" name="q" value="{_escape(q)}"><strong>批量删除</strong><span class="muted">将删除当前筛选结果，不受分页数量限制。</span><button class="danger" type="submit">删除全部筛选结果</button></form>'
         tag_summary = "无标签" if tag == _UNTAGGED_FILTER else (str(selected_tag["display_name"]) if selected_tag is not None else "全部标签")
         result = f'<section class="result-toolbar"><div><p class="eyebrow">图片库</p><h2>{_escape(heading)}</h2><p class="muted">当前条件：标签：{_escape(tag_summary)}</p><p class="muted">真实方向来自图片内容；存放目录只是文件所在的归档目录。</p><p class="muted">操作按状态、标签、归档分组；危险操作会要求确认。删除本地原图前会提示：确定删除本地原图？此操作不可撤销。</p></div><strong>筛选结果：{int(total)} 张</strong></section>'
         if not listing:
@@ -1067,8 +1089,38 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
         _sid, _session, form = await write_auth(request)
         try:
             ids = {int(v) for v in form.getlist("image_ids") if str(v).isdigit()}
+            if str(form.get("all_filtered", "")) == "1":
+                orientation = str(form.get("orientation", ""))
+                enabled = str(form.get("enabled", ""))
+                storage = str(form.get("storage", ""))
+                tag = str(form.get("tag", ""))
+                q = str(form.get("q", ""))[:100]
+                clauses = ["i.source='local'"]
+                args: list[object] = []
+                if orientation in {"desktop", "mobile", "square"}:
+                    clauses.append("i.orientation=?")
+                    args.append(orientation)
+                if enabled in {"0", "1"}:
+                    clauses.append("i.enabled=?")
+                    args.append(int(enabled))
+                if storage == "root":
+                    clauses.append("instr(i.rel_path,'/')=0")
+                elif storage in {"desktop", "mobile", "square"}:
+                    clauses.append("i.rel_path LIKE ? ESCAPE '\\'")
+                    args.append(storage + "/%")
+                if tag == _UNTAGGED_FILTER:
+                    clauses.append("NOT EXISTS(SELECT 1 FROM image_tags x WHERE x.image_id=i.id)")
+                elif tag:
+                    db.validate_slug(tag)
+                    clauses.append("EXISTS(SELECT 1 FROM image_tags x JOIN tags t ON t.id=x.tag_id WHERE x.image_id=i.id AND t.slug=? COLLATE NOCASE)")
+                    args.append(tag)
+                if q:
+                    clauses.append("i.rel_path LIKE ? ESCAPE '\\'")
+                    args.append(_like_pattern(q))
+                with db.get_conn(settings.database_path) as conn:
+                    ids = {int(row[0]) for row in conn.execute("SELECT i.id FROM images i WHERE " + " AND ".join(clauses), args)}
             if not ids:
-                raise ValueError("请先选择至少一张图片")
+                raise ValueError("当前筛选条件下没有图片")
             action = str(form.get("action", ""))
             if action not in {"add", "remove"}:
                 raise ValueError("无效的标签操作")
@@ -1095,6 +1147,93 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
         except (ValueError, LookupError, sqlite3.IntegrityError, OSError) as exc:
             return _error_page("批量标签操作失败", str(exc) if isinstance(exc, (ValueError, LookupError)) else "标签操作无法完成")
         return _redirect(f"{admin_path}/images?source=local", "标签已更新")
+
+    @router.post("/images/delete")
+    async def batch_delete_images(request: Request):
+        _sid, _session, form = await write_auth(request)
+        if str(form.get("confirm", "")) not in {"1", "DELETE"}:
+            raise HTTPException(400, "请确认后再删除图片。")
+        try:
+            ids = {int(value) for value in form.getlist("image_ids") if str(value).isdigit()}
+            if str(form.get("all_filtered", "")) == "1":
+                orientation = str(form.get("orientation", ""))
+                enabled = str(form.get("enabled", ""))
+                storage = str(form.get("storage", ""))
+                tag = str(form.get("tag", ""))
+                q = str(form.get("q", ""))[:100]
+                clauses = ["i.source='local'"]
+                args: list[object] = []
+                if orientation in {"desktop", "mobile", "square"}:
+                    clauses.append("i.orientation=?")
+                    args.append(orientation)
+                if enabled in {"0", "1"}:
+                    clauses.append("i.enabled=?")
+                    args.append(int(enabled))
+                if storage == "root":
+                    clauses.append("instr(i.rel_path,'/')=0")
+                elif storage in {"desktop", "mobile", "square"}:
+                    clauses.append("i.rel_path LIKE ? ESCAPE '\\'")
+                    args.append(storage + "/%")
+                if tag == _UNTAGGED_FILTER:
+                    clauses.append("NOT EXISTS(SELECT 1 FROM image_tags x WHERE x.image_id=i.id)")
+                elif tag:
+                    db.validate_slug(tag)
+                    clauses.append("EXISTS(SELECT 1 FROM image_tags x JOIN tags t ON t.id=x.tag_id WHERE x.image_id=i.id AND t.slug=? COLLATE NOCASE)")
+                    args.append(tag)
+                if q:
+                    clauses.append("i.rel_path LIKE ? ESCAPE '\\'")
+                    args.append(_like_pattern(q))
+                with db.get_conn(settings.database_path) as lookup:
+                    ids = {int(row[0]) for row in lookup.execute("SELECT i.id FROM images i WHERE " + " AND ".join(clauses), args)}
+            if not ids:
+                raise ValueError("当前筛选条件下没有可删除的本地图片")
+            images_root = Path(settings.images_dir).resolve()
+            quarantine = images_root / f".batch-delete-{secrets.token_hex(12)}"
+            moved: list[tuple[Path, Path]] = []
+            with db.get_conn(settings.database_path) as conn:
+                placeholders = ",".join("?" for _ in ids)
+                rows = conn.execute(f"SELECT id,rel_path,source FROM images WHERE id IN ({placeholders})", tuple(ids)).fetchall()
+                if len(rows) != len(ids) or any(str(row["source"]) != "local" for row in rows):
+                    raise LookupError("图片不存在或不是本地图片")
+                quarantine.mkdir(mode=0o700)
+                try:
+                    for index, row in enumerate(rows):
+                        source = _safe_db_file(images_root, str(row["rel_path"]))
+                        if not source.is_file() or source.is_symlink():
+                            raise LookupError("图片文件不存在，已停止批量删除")
+                        target = quarantine / f"{index}-{secrets.token_hex(8)}{source.suffix}"
+                        os.replace(source, target)
+                        moved.append((source, target))
+                    conn.execute("BEGIN")
+                    deleted = 0
+                    for row in rows:
+                        cursor = conn.execute("DELETE FROM images WHERE id=? AND source='local'", (int(row["id"]),))
+                        deleted += int(cursor.rowcount)
+                    if deleted != len(rows):
+                        raise LookupError("部分图片未能删除，操作已回滚")
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    restore_error = None
+                    for source, target in reversed(moved):
+                        if target.exists():
+                            try:
+                                source.parent.mkdir(parents=True, exist_ok=True)
+                                os.replace(target, source)
+                            except OSError as exc:
+                                restore_error = exc
+                    if restore_error is not None:
+                        raise OSError(f"批量删除已回滚，但文件恢复失败；请保留隔离目录 {quarantine.name} 并联系管理员") from restore_error
+                    shutil.rmtree(quarantine, ignore_errors=True)
+                    raise
+                else:
+                    shutil.rmtree(quarantine, ignore_errors=True)
+            scan(request)
+            return _redirect(f"{admin_path}/images?source=local", f"已删除 {len(moved)} 张图片")
+        except HTTPException:
+            raise
+        except (ValueError, LookupError, sqlite3.IntegrityError, OSError) as exc:
+            return _error_page("批量删除失败", str(exc))
 
     @router.post("/images/{image_id}/tags")
     async def image_tags(image_id: int, request: Request):
@@ -1442,7 +1581,7 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
 
     def render_archive_preview(token: str, pending: _Preview, session: _Session) -> HTMLResponse:
         summary = pending.summary
-        hints = sorted({hint for _digest, hint in pending.entries if hint})
+        hints = sorted({str(item.get("hint", "")) for item in pending.entries if item.get("hint")})
         choices = "".join(
             f'<label><input type="checkbox" name="map_dirs" value="{_escape(hint)}" checked> 映射目录 {_escape(hint)}</label><br>'
             for hint in hints
@@ -1467,8 +1606,14 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
             ("竖屏", summary["mobile"]), ("方形", summary["square"]),
         )
         summary_html = "".join(f"<dt>{_escape(label)}</dt><dd>{int(value)}</dd>" for label, value in summary_items)
+        member_rows = "".join(
+            f'<label class="archive-member"><input type="checkbox" name="exclude_member_ids" value="{_escape(str(item.get("id", "")))}"> '
+            f'<span>{_escape(str(item.get("name", "")))}</span> '
+            f'<span class="muted">{_escape(str(item.get("orientation", "unknown")))} / {int(item.get("size", 0))} bytes</span></label>'
+            for item in pending.entries
+        )
         body = (
-            '<p class="muted">请检查导入内容和标签；确认前仍可调整本次全部图片的标签。</p>'
+            '<p class="muted">请检查导入内容和标签；确认前仍可调整本次全部图片的标签，勾选不需要的图片即可在确认时排除。</p>'
             f'<section aria-labelledby="archive-summary-title"><h2 id="archive-summary-title">导入摘要</h2><dl class="detail-grid">{summary_html}</dl></section>'
             f'<form method="post" action="{admin_path}/archives/confirm">{hidden(session.csrf)}'
             f'<input type="hidden" name="token" value="{_escape(token)}">'
@@ -1476,6 +1621,7 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
             f'<label>本次所有图片的主标签（可选） <select name="default_tag">{default_options}</select></label>'
             '<input type="hidden" name="tags_present" value="1"><br>'
             f'<fieldset><legend>追加标签（可多选）</legend>{tag_choices}</fieldset>'
+            f'<fieldset><legend>排除图片（可选）</legend><p class="muted">排除项仍会完成安全检查，但不会写入图库、占用导入容量或获得本次标签。</p>{member_rows}</fieldset>'
             f'{choices}<button>确认导入</button></form>'
         )
         return _page("归档预览", body, session.csrf)
@@ -1487,7 +1633,7 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
         _directory, path = upload_store._paths(task_id)
         pending = _Preview(
             sid, path, float(row["expires_at"]), int(row["expected_size"]), str(row["archive_sha256"]),
-            json.loads(str(row["summary_json"])), [tuple(item) for item in json.loads(str(row["entries_json"]))],
+            json.loads(str(row["summary_json"])), _normalize_entries(json.loads(str(row["entries_json"]))),
             str(row["selected_default_tag"]), tuple(json.loads(str(row["selected_tags_json"]))), True, owner_key,
         )
         return pending
@@ -1648,6 +1794,7 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
                     square_policy=settings.square_policy,
                     limits=limits,
                     archive_suffix=archive_suffix,
+                    excluded_member_ids=set(),
                 )
                 entries = _archive_entries(path, limits, archive_suffix)
                 return upload_store.mark_preview(
@@ -1678,7 +1825,7 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
             _sid, _session, owner_key = upload_api_auth(request, write=True)
             row = await run_in_threadpool(validate_chunked_archive, task_id, owner_key)
             json.loads(str(row["summary_json"]))
-            [tuple(item) for item in json.loads(str(row["entries_json"]))]
+            _normalize_entries(json.loads(str(row["entries_json"])))
             return JSONResponse({"status": "preview_ready", "preview_url": f"{admin_path}/archives/uploads/{task_id}/preview"}, headers=upload_headers(row))
         except UploadError as exc:
             return upload_error(exc)
@@ -1783,6 +1930,7 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
         pending: _Preview,
         selected_slugs: list[str],
         selected_hints: set[str],
+        excluded_member_ids: set[str],
         owner_key: str,
     ) -> Any:
         def import_locked(
@@ -1824,6 +1972,7 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
                     square_policy=settings.square_policy,
                     limits=limits,
                     archive_suffix=archive_suffix,
+                    excluded_member_ids=excluded_member_ids,
                 )
                 upload_store.ensure_import_capacity(token, current_preview.import_required_bytes)
                 summary = importer.import_archive(
@@ -1833,10 +1982,14 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
                     square_policy=settings.square_policy,
                     limits=limits,
                     archive_suffix=archive_suffix,
+                    excluded_member_ids=excluded_member_ids,
                 )
                 scan(request)
                 with db.get_conn(settings.database_path) as conn:
-                    for digest, hint in pending.entries:
+                    for entry in pending.entries:
+                        if str(entry.get("id", "")) in excluded_member_ids:
+                            continue
+                        digest, hint = str(entry["sha256"]), str(entry.get("hint", ""))
                         row = conn.execute("SELECT id FROM images WHERE content_hash=?", (digest,)).fetchone()
                         if row is None:
                             continue
@@ -1916,7 +2069,11 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
                     *(("tags", slug) for slug in pending.selected_tags),
                 ])
             selected_slugs = _selected_tag_slugs(form)
-            available_hints = {hint for _digest, hint in pending.entries if hint}
+            available_member_ids = {str(item.get("id", "")) for item in pending.entries}
+            excluded_member_ids = {str(value) for value in form.getlist("exclude_member_ids")}
+            if not excluded_member_ids <= available_member_ids:
+                raise ValueError("invalid excluded archive member")
+            available_hints = {str(item.get("hint", "")) for item in pending.entries if item.get("hint")}
             if str(form.get("map_dirs_present", "")) == "1":
                 selected_hints = {db.validate_slug(str(value)) for value in form.getlist("map_dirs")}
                 if not selected_hints <= available_hints:
@@ -1932,7 +2089,7 @@ def create_admin_router(settings: Any, upload_store: UploadStore | None = None) 
         try:
             try:
                 summary = await run_in_threadpool(
-                    perform_archive_confirm, request, token, pending, selected_slugs, selected_hints, owner_key
+                    perform_archive_confirm, request, token, pending, selected_slugs, selected_hints, excluded_member_ids, owner_key
                 )
                 succeeded = True
             except importer.ImportStorageError as exc:

@@ -1680,3 +1680,106 @@ def test_same_persistent_preview_concurrent_confirm_imports_once(admin_env) -> N
         statuses = sorted(future.result(timeout=10).status_code for future in futures)
     assert statuses == [303, 404]
     assert len(list(settings.images_dir.rglob("*.png"))) == 1
+
+
+def test_batch_tags_apply_to_all_filtered_images_across_pages(admin_env) -> None:
+    settings, app = admin_env
+    with new_client(app) as client:
+        csrf = login(client)
+        for slug in ("source", "game"):
+            assert client.post(
+                f"{ADMIN}/tags",
+                data={"csrf": csrf, "slug": slug, "display_name": slug},
+                follow_redirects=False,
+            ).status_code == 303
+        for index in range(3):
+            assert client.post(
+                f"{ADMIN}/upload",
+                data={"csrf": csrf, "tags": "source"},
+                files={"file": (f"image-{index}.png", image_bytes(size=(40 + index, 10)), "image/png")},
+                follow_redirects=False,
+            ).status_code == 303
+        response = client.post(
+            f"{ADMIN}/images/tags",
+            data={
+                "csrf": csrf,
+                "all_filtered": "1",
+                "orientation": "desktop",
+                "enabled": "1",
+                "storage": "",
+                "tag": "source",
+                "q": "",
+                "tag_id": "2",
+                "action": "add",
+            },
+            follow_redirects=False,
+        )
+        assert response.status_code == 303, response.text
+        with db.get_conn(settings.database_path) as conn:
+            tagged = conn.execute(
+                "SELECT COUNT(*) FROM image_tags it JOIN tags t ON t.id=it.tag_id WHERE t.slug='game'"
+            ).fetchone()[0]
+        assert int(tagged) == 3
+
+
+def test_batch_delete_cascades_image_tags_and_removes_files(admin_env) -> None:
+    settings, app = admin_env
+    with new_client(app) as client:
+        csrf = login(client)
+        assert client.post(
+            f"{ADMIN}/tags",
+            data={"csrf": csrf, "slug": "cleanup", "display_name": "cleanup"},
+            follow_redirects=False,
+        ).status_code == 303
+        for index in range(2):
+            assert client.post(
+                f"{ADMIN}/upload",
+                data={"csrf": csrf, "tags": "cleanup"},
+                files={"file": (f"delete-{index}.png", image_bytes(size=(50 + index, 10)), "image/png")},
+                follow_redirects=False,
+            ).status_code == 303
+        with db.get_conn(settings.database_path) as conn:
+            assert int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]) == 2
+            assert int(conn.execute("SELECT COUNT(*) FROM image_tags").fetchone()[0]) == 2
+        response = client.post(
+            f"{ADMIN}/images/delete",
+            data={
+                "csrf": csrf,
+                "confirm": "DELETE",
+                "all_filtered": "1",
+                "orientation": "desktop",
+                "enabled": "1",
+                "storage": "",
+                "tag": "cleanup",
+                "q": "",
+            },
+            follow_redirects=False,
+        )
+        assert response.status_code == 303, response.text
+        assert not list(settings.images_dir.rglob("*.png"))
+        with db.get_conn(settings.database_path) as conn:
+            assert int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]) == 0
+            assert int(conn.execute("SELECT COUNT(*) FROM image_tags").fetchone()[0]) == 0
+
+
+def test_archive_confirm_excludes_selected_member(admin_env) -> None:
+    settings, app = admin_env
+    payload = archive_bytes({
+        "keep.png": image_bytes("PNG", (40, 10)),
+        "remove.png": image_bytes("PNG", (10, 40)),
+    })
+    with new_client(app) as client:
+        csrf = login(client)
+        token, response = preview(client, csrf, payload)
+        member_ids = re.findall(r'name="exclude_member_ids" value="([^"]+)"', response.text)
+        assert len(member_ids) == 2
+        remove_id = member_ids[1]
+        confirmed = client.post(
+            f"{ADMIN}/archives/confirm",
+            data={"csrf": csrf, "token": token, "exclude_member_ids": remove_id},
+            follow_redirects=False,
+        )
+        assert confirmed.status_code == 303, confirmed.text
+        with db.get_conn(settings.database_path) as conn:
+            assert int(conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]) == 1
+        assert len(list(settings.images_dir.rglob("*.png"))) == 1

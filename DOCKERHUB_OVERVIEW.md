@@ -2,7 +2,7 @@
 
 # Random Image API：Docker Hub 与 V3.0.0 部署说明
 
-Random Image API V2 是 V1 的向后兼容扩展，增加 tags、多对多主题、主题随机接口和安全管理 UI，同时保留 V1 的 `/random`、本地/Hybrid、WebDAV 默认 90% 远程优先、缓存、importer 和 Backup / Restore。V2.2 继续兼容 V2.0 的 API 与数据库，重点改善管理网页、图片预览、目录整理和标签编辑体验。
+Random Image API V3.0.0 在 V1/V2 能力基础上提供持久化可恢复网页分片上传，并整合 tags、多对多主题、主题随机接口、安全管理 UI、本地/Hybrid、WebDAV、缓存、importer 和 Backup / Restore。V3 保持既有 `/random` 与 `?type=` 接口兼容，并进一步完善批量图片管理和归档筛选。
 
 ## 发布状态（请先阅读）
 
@@ -11,12 +11,12 @@ Random Image API V2 是 V1 的向后兼容扩展，增加 tags、多对多主题
 - **当前发布镜像**：`qinlingmonkey/random-image-api:v3`
 - **V3.0.0 Manifest digest**：`sha256:a8951d587fd88e81af9ba25b4ab912a76cb29238ce8b72d406e7a80b4b34e6cd`
 - **V3.0.0 源码提交**：`69e1f0b27cfc241b86f3555f905faa25483e1b74`
-- **V2.2.4 验收状态**：完整测试为 `93 passed`，Node 上传校验测试通过；容器 `healthy`、版本 `2.2.4`、PID 1 UID `1000`，管理总览与归档预览的用户文案、结构化摘要、标签提示和内部信息隔离均通过 HTTP/HTML 合同检查
+- **V3.0.0 验收状态**：完整测试为 `139 passed`，Node 上传校验测试通过；容器 `healthy`、版本 `3.0.0`、PID 1 UID `1000`，管理总览与归档预览的用户文案、结构化摘要、标签提示和内部信息隔离均通过 HTTP/HTML 合同检查
 - **平台**：`linux/amd64`
-- **V2.2.4 Manifest / Registry 摘要**：`sha256:d00a6f75f028a913cb33062f80d9e3de68da6f82b4e88fb402b7cf64194257da`
-- **V2.2.4 Config 摘要**：`sha256:483a5c6f60e276eaf1343f444158700ef89cfe2f1dba50267b27c82cefef64e9`
+- **V3.0.0 Manifest / Registry 摘要**：`sha256:a8951d587fd88e81af9ba25b4ab912a76cb29238ce8b72d406e7a80b4b34e6cd`
+- **V3.0.0 Config 摘要（待本次镜像发布后回填）**：`sha256:483a5c6f60e276eaf1343f444158700ef89cfe2f1dba50267b27c82cefef64e9`
 - **镜像结构**：12 层；Entrypoint `/usr/local/bin/docker-entrypoint.sh`
-- **V2.2.4 源码功能提交**：`8fdc465972f6cb9f53cd4eb58b9d22ddb35c7ade`（已同步 GitHub `main`）
+- **V3.0.0 源码功能提交（待本次提交后回填）**：`8fdc465972f6cb9f53cd4eb58b9d22ddb35c7ade`（已同步 GitHub `main`）
 - **V2.2.3 历史摘要**：Registry `sha256:4b752bb391020f90fbf15c5e902d2f767b7b62d702e5731ab21ee80a13ccf82a`；Config `sha256:bb31ae8011517dfffd685fc8063717793e630211da46844224dad52738128fff`
 - **V2.2.2 历史摘要**：Registry `sha256:7ca9a5958242417a0b1f9b5b5609a437f8158db55ab5323e989adcd098d0ae2f`；Config `sha256:0c1a92c610d5af76bb115f8ceab8d4b70f10be778ee5cef6b0843b7b83267ef3`
 - **V2.2.1 历史摘要**：Registry `sha256:bd1dc2e6fa5b0882cb9fb3d6bf8816d2f175e7bd05624b3140544d9efefbbda8`；Config `sha256:1088deae369cf6e5a3e370dc4beaf7399b672cb6988ec5686cd9d3b316956633`
@@ -24,11 +24,11 @@ Random Image API V2 是 V1 的向后兼容扩展，增加 tags、多对多主题
 - **兼容回滚版本**：`qinlingmonkey/random-image-api:v1`，继续保留且不会被 V2 覆盖
 - **Docker Hub 线上 Overview**：本文件为同步来源；发布收尾时通过 API 回读正文并校验一致性
 
-V2 是 V1 的扩展：旧的 `/random`、`?type=`、本地图库和 WebDAV Hybrid 部署可以继续使用；升级前仍应先备份 SQLite 与永久图片。
+V3 是 V1/V2 的兼容升级：旧的 `/random`、`?type=`、本地图库和 WebDAV Hybrid 部署可以继续使用；升级前仍应先备份 SQLite 与永久图片。
 
-V2.2.4 将管理页面与内部技术说明明确分层：页面仅展示支持格式、当前配置上限、标签作用范围、上传状态和可执行错误提示；服务端临时目录、进程状态、代理实现及固定故障样例不再出现在操作页面。归档 preview 使用结构化中文摘要，确认前仍可调整本次全部图片的标签。正式发布后已独立回读并确认上述镜像元数据。
+V3.0.0 将管理页面与内部技术说明明确分层：页面仅展示支持格式、当前配置上限、标签作用范围、上传状态和可执行错误提示；服务端临时目录、进程状态、代理实现及固定故障样例不再出现在操作页面。归档 preview 使用结构化中文摘要，确认前仍可调整本次全部图片的标签。正式发布后已独立回读并确认上述镜像元数据。
 
-## 1. 使用 V2 镜像快速部署
+## 1. 使用 V3 镜像快速部署
 
 创建项目目录，并下载仓库提供的完整环境配置模板：
 
@@ -44,7 +44,7 @@ cp .env.example .env
 ```yaml
 services:
   api:
-    image: qinlingmonkey/random-image-api:v2
+    image: qinlingmonkey/random-image-api:v3
     restart: unless-stopped
     ports:
       - "10086:10086"
@@ -65,7 +65,7 @@ services:
 只需把模板设置为镜像部署，并生成两个不同的管理 Secret：
 
 ```bash
-sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=v2/" .env
+sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=v3/" .env
 sed -i "s/^IMAGE_NAME=.*/IMAGE_NAME=qinlingmonkey\\/random-image-api/" .env
 sed -i "s/^ADMIN_TOKEN=.*/ADMIN_TOKEN=$(openssl rand -hex 32)/" .env
 sed -i "s/^ADMIN_SESSION_SECRET=.*/ADMIN_SESSION_SECRET=$(openssl rand -hex 32)/" .env
@@ -116,7 +116,7 @@ curl -fsS http://127.0.0.1:10086/health
 
 WebDAV 密码只保存在服务器 `.env`，不要提交到 GitHub、备份或 Docker Hub。
 
-## 2. 可选：从源码构建 V2
+## 2. 可选：从源码构建 V3
 
 ```bash
 git clone https://github.com/time-wanderer/random-image-api.git
@@ -144,7 +144,7 @@ docker compose up -d --build
 docker compose down
 ```
 
-## 3. V2 API
+## 3. V3 API
 
 V1 接口完全保留：
 
@@ -153,7 +153,7 @@ curl -D - -o image.bin http://127.0.0.1:10086/random
 curl -D - -o image.bin 'http://127.0.0.1:10086/random?type=desktop'
 ```
 
-V2 主题接口：
+V3 主题接口：
 
 ```bash
 curl -D - -o image.bin http://127.0.0.1:10086/random/anime
@@ -178,7 +178,7 @@ data/images/mobile/
 data/images/square/
 ```
 
-服务按真实宽高判断方向。正方形图片从 V2.2 起保存到 `square/`；`SQUARE_POLICY` 只控制随机池归属。旧位置中的正方形图片继续兼容，不会自动迁移。V2 管理 UI 默认为：
+服务按真实宽高判断方向。正方形图片从 V3.0.0 起保存到 `square/`；`SQUARE_POLICY` 只控制随机池归属。旧位置中的正方形图片继续兼容，不会自动迁移。V3 管理 UI 默认为：
 
 ```text
 http://<主机>:10086/manage-images
@@ -196,6 +196,8 @@ http://<主机>:10086/manage-images
 - ZIP/TAR.GZ/TGZ 归档上传前校验、真实上传进度、代理/网络错误恢复和无 JS 普通表单 fallback；
 - 把本地图片移动到 `desktop`、`mobile` 或 `square`，且不改变真实方向；
 - 点击按钮后二次确认删除本地原图，不再手写 `DELETE`；
+- 按当前筛选结果跨分页批量添加/移除标签和删除本地图片；删除时 SQLite `image_tags` 关系自动级联清理，标签定义保留；
+- 归档预览支持搜索和逐项排除，排除项仍安全校验但不进入导入、容量统计或本次标签。
 - WebDAV 对象启停、缓存维护和清空；未缓存对象只显示占位，不自动下载。
 
 管理 UI 使用签名会话、HttpOnly / SameSite=Strict Cookie、登录限速与 CSRF。生产环境应置于 HTTPS 反向代理后，并设置独立随机的 `ADMIN_TOKEN` 与 `ADMIN_SESSION_SECRET`。
@@ -214,7 +216,7 @@ python -m app.importer /path/to/images.tar.gz \
 
 文件夹应先用 `tar -czf /tmp/photos.tar.gz -C /path/to photos` 打包后运行 CLI；也可复制图片到 `data/images/{desktop,mobile,square}/` 后调用 `POST /admin/rescan`。
 
-V2 管理 UI 推荐使用两阶段流程：
+V3 管理 UI 推荐使用两阶段流程：
 
 1. **preview**：上传归档，先完整校验路径穿越、成员数、单文件/总大小、压缩比和真实图片格式，执行 dry-run，不写入永久图库；上传前可选择多个已有启用标签，空表示不加标签；
 2. **confirm**：核对统计、上传前标签及归档成员父目录产生的目录标签映射后，才正式导入；预览页仍可复核修改。上传前选择的标签应用于本次所有图片。
@@ -246,7 +248,7 @@ mobile/anime/tall.webp
 desktop/landscape/lake.jpg
 ```
 
-V2 把 `desktop/` 或 `mobile/` 下第一层目录视为 tag 提示。同步只保存索引；图片命中后才下载到缓存。管理员手工禁用的远端对象不会因后续同步被重新启用。
+V3 把 `desktop/` 或 `mobile/` 下第一层目录视为 tag 提示。同步只保存索引；图片命中后才下载到缓存。管理员手工禁用的远端对象不会因后续同步被重新启用。
 
 默认 `HYBRID_REMOTE_PROBABILITY=0.9`，即保留 V1 的 90% WebDAV 优先策略。远端失败时使用当前方向的缓存/本地候选，再按配置做方向回退。缓存继续支持条件刷新、LRU 容量淘汰和随机轮换。
 
@@ -257,7 +259,7 @@ curl -fsS -X POST -H 'X-Admin-Token: <ADMIN_TOKEN>' \
   http://127.0.0.1:10086/admin/cache/maintain
 ```
 
-## 7. V2 关键环境变量
+## 7. V3 关键环境变量
 
 | 用途 | 变量 |
 | --- | --- |
