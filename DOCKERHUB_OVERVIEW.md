@@ -9,11 +9,11 @@ Random Image API V3.0.0 在 V1/V2 能力基础上提供持久化可恢复网页�
 - **当前工作区源码版本**：V3.0.0（已发布）
 - **当前发布镜像版本**：V3.0.0，已完成远程隔离验收与 Registry 回读
 - **当前发布镜像**：`qinlingmonkey/random-image-api:v3`
-- **V3.0.0 Manifest digest**：`sha256:a8951d587fd88e81af9ba25b4ab912a76cb29238ce8b72d406e7a80b4b34e6cd`
-- **V3.0.0 源码提交**：`69e1f0b27cfc241b86f3555f905faa25483e1b74`
+- **V3.0.0 Manifest digest**：`sha256:c8bf1ffcf92b390fcdfcd5852d8a2f1151cc923d4743e6c712327f5dd9a5c9d6`
+- **V3.0.0 源码提交**：`0a9b07bd55955d5df7489e1cee5f96577797c24e`
 - **V3.0.0 验收状态**：完整测试为 `139 passed`，Node 上传校验测试通过；容器 `healthy`、版本 `3.0.0`、PID 1 UID `1000`，管理总览与归档预览的用户文案、结构化摘要、标签提示和内部信息隔离均通过 HTTP/HTML 合同检查
 - **平台**：`linux/amd64`
-- **V3.0.0 Manifest / Registry 摘要**：`sha256:a8951d587fd88e81af9ba25b4ab912a76cb29238ce8b72d406e7a80b4b34e6cd`
+- **V3.0.0 Manifest / Registry 摘要**：`sha256:c8bf1ffcf92b390fcdfcd5852d8a2f1151cc923d4743e6c712327f5dd9a5c9d6`
 - **镜像结构**：12 层；Entrypoint `/usr/local/bin/docker-entrypoint.sh`
 - **V3.0.0 源码功能提交**：`0a9b07bd55955d5df7489e1cee5f96577797c24e`（已同步 GitHub `main`）
 - **V2.2.3 历史摘要**：Registry `sha256:4b752bb391020f90fbf15c5e902d2f767b7b62d702e5731ab21ee80a13ccf82a`；Config `sha256:bb31ae8011517dfffd685fc8063717793e630211da46844224dad52738128fff`
