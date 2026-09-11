@@ -14,9 +14,8 @@ Random Image API V3.0.0 在 V1/V2 能力基础上提供持久化可恢复网页�
 - **V3.0.0 验收状态**：完整测试为 `139 passed`，Node 上传校验测试通过；容器 `healthy`、版本 `3.0.0`、PID 1 UID `1000`，管理总览与归档预览的用户文案、结构化摘要、标签提示和内部信息隔离均通过 HTTP/HTML 合同检查
 - **平台**：`linux/amd64`
 - **V3.0.0 Manifest / Registry 摘要**：`sha256:a8951d587fd88e81af9ba25b4ab912a76cb29238ce8b72d406e7a80b4b34e6cd`
-- **V3.0.0 Config 摘要（待本次镜像发布后回填）**：`sha256:483a5c6f60e276eaf1343f444158700ef89cfe2f1dba50267b27c82cefef64e9`
 - **镜像结构**：12 层；Entrypoint `/usr/local/bin/docker-entrypoint.sh`
-- **V3.0.0 源码功能提交（待本次提交后回填）**：`8fdc465972f6cb9f53cd4eb58b9d22ddb35c7ade`（已同步 GitHub `main`）
+- **V3.0.0 源码功能提交**：`0a9b07bd55955d5df7489e1cee5f96577797c24e`（已同步 GitHub `main`）
 - **V2.2.3 历史摘要**：Registry `sha256:4b752bb391020f90fbf15c5e902d2f767b7b62d702e5731ab21ee80a13ccf82a`；Config `sha256:bb31ae8011517dfffd685fc8063717793e630211da46844224dad52738128fff`
 - **V2.2.2 历史摘要**：Registry `sha256:7ca9a5958242417a0b1f9b5b5609a437f8158db55ab5323e989adcd098d0ae2f`；Config `sha256:0c1a92c610d5af76bb115f8ceab8d4b70f10be778ee5cef6b0843b7b83267ef3`
 - **V2.2.1 历史摘要**：Registry `sha256:bd1dc2e6fa5b0882cb9fb3d6bf8816d2f175e7bd05624b3140544d9efefbbda8`；Config `sha256:1088deae369cf6e5a3e370dc4beaf7399b672cb6988ec5686cd9d3b316956633`

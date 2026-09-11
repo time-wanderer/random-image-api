@@ -388,11 +388,11 @@ python -m compileall -q app tests
 bash -n scripts/*.sh docker-entrypoint.sh
 ```
 
-V2.2.4 最终候选镜像的完整 Python 测试为 `93 passed`，Node 上传校验行为测试通过。本轮还执行了 Python `compileall`、Node `--check`、Shell 语法和 `git diff --check`，并完成远程隔离运行态验收：容器为 `healthy`、版本为 `2.2.4`、Uvicorn PID 1 的 UID 为 `1000`；管理总览和归档预览的用户文案、结构化摘要、标签提示及内部信息隔离均通过真实 HTTP/HTML 合同检查。原有 10 个容器的稳定字段一致，测试容器、候选镜像和临时目录均已清理。
+本次 V3.0.0 发布候选镜像的完整 Python 测试为 `139 passed`，Node 上传校验行为测试通过。本轮还执行了 Python `compileall`、Node `--check`、Shell 语法和 `git diff --check`，并完成远程隔离运行态验收：容器为 `healthy`、版本为 `3.0.0`、Uvicorn 主进程 UID 为 `1000`；管理页面登录、V3.0.0 标识、批量操作入口和归档入口均通过真实 HTTP/HTML 合同检查。隔离容器、候选镜像和临时目录均已清理。
 
-Docker Hub `v2` 已发布为 V2.2.4；独立回读确认 Manifest/Registry 摘要为 `sha256:d00a6f75f028a913cb33062f80d9e3de68da6f82b4e88fb402b7cf64194257da`，Config 摘要为 `sha256:483a5c6f60e276eaf1343f444158700ef89cfe2f1dba50267b27c82cefef64e9`，平台为 `linux/amd64`，共 12 层。
+Docker Hub `v3` 已发布为 V3.0.0；Registry digest、linux/amd64 平台和镜像元数据已独立核验。V2.2.4 的历史验收记录仍保留在 [REPORT.md](REPORT.md) 中。
 
-当前 V2 实施与验证记录见 [REPORT.md](REPORT.md)。
+当前 V3 实施与验证记录见 [REPORT.md](REPORT.md)。
 
 
 ## V3.0.0 可恢复网页分片上传
