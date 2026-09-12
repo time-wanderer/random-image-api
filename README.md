@@ -4,8 +4,6 @@
 
 Random Image API V3.0.0 在既有 V1/V2 能力上新增持久化可恢复网页分片上传，同时保留 `GET /random`、`?type=`、本地图库、WebDAV Hybrid、缓存、归档 importer、Backup / Restore、主题标签和安全管理 UI。
 
-> 当前源码和 Docker Hub `v3` 镜像均已发布。V3 镜像使用 `linux/amd64` 构建；旧镜像的历史验收信息保留在实施记录中。
-
 V1 快照见 [docs/V1.md](docs/V1.md)，V1 原地升级和 VPS 迁移见 [MIGRATION.md](MIGRATION.md)。
 
 ## 1. V3.0.0 能力概览
@@ -387,8 +385,6 @@ python -m pytest
 python -m compileall -q app tests
 bash -n scripts/*.sh docker-entrypoint.sh
 ```
-
-本次 V3.0.0 发布候选镜像的完整 Python 测试为 `139 passed`，Node 上传校验行为测试通过。本轮还执行了 Python `compileall`、Node `--check`、Shell 语法和 `git diff --check`，并完成远程隔离运行态验收：容器为 `healthy`、版本为 `3.0.0`、Uvicorn 主进程 UID 为 `1000`；管理页面登录、V3.0.0 标识、批量操作入口和归档入口均通过真实 HTTP/HTML 合同检查。隔离容器、候选镜像和临时目录均已清理。
 
 Docker Hub `v3` 已发布为 V3.0.0；Registry digest、linux/amd64 平台和镜像元数据已独立核验。V2.2.4 的历史验收记录仍保留在 [REPORT.md](REPORT.md) 中。
 
