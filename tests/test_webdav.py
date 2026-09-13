@@ -303,6 +303,38 @@ def test_safe_href_requires_same_host_and_configured_root(tmp_path: Path) -> Non
         manager.close()
 
 
+def test_webdav_base_path_is_preserved_for_roots_and_hrefs(tmp_path: Path) -> None:
+    settings = webdav_settings(
+        tmp_path,
+        webdav_base_url="https://dav.example.test/random-image-api/",
+    )
+    manager = WebDAVManager(
+        settings,
+        transport=httpx.MockTransport(propfind_for_path),
+    )
+    try:
+        assert manager._roots == {
+            "desktop": "https://dav.example.test/random-image-api/desktop/",
+            "mobile": "https://dav.example.test/random-image-api/mobile/",
+        }
+        assert manager.validate_href(
+            "/random-image-api/mobile/tall.png", "mobile"
+        ) == "https://dav.example.test/random-image-api/mobile/tall.png"
+        assert manager.validate_href("tall.png", "mobile") == (
+            "https://dav.example.test/random-image-api/mobile/tall.png"
+        )
+
+        for href in (
+            "/mobile/outside-base.png",
+            "/random-image-api/desktop/wrong.png",
+            "https://evil.example/random-image-api/mobile/a.png",
+        ):
+            with pytest.raises(UnsafeHrefError):
+                manager.validate_href(href, "mobile")
+    finally:
+        manager.close()
+
+
 def test_failed_sync_keeps_existing_index(tmp_path: Path) -> None:
     mode = ["ok"]
 

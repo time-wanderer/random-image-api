@@ -119,17 +119,15 @@ class WebDAVManager:
         return base, roots
 
     def _root_url(self, base: str, root: str) -> str:
-        # A leading slash is interpreted below the configured host, never as a new host.
-        base_parts = urlsplit(base)
+        # Root paths are always relative to the configured WebDAV base path.  A
+        # leading slash is accepted for compatibility with the documented
+        # defaults, but must not discard a base path such as /webdav/photos/.
         path = root.strip()
         if not path:
             raise WebDAVConfigurationError("WebDAV root cannot be empty")
         if path.startswith("//") or urlsplit(path).scheme or urlsplit(path).netloc:
             raise WebDAVConfigurationError("invalid WebDAV root")
-        if path.startswith("/"):
-            candidate = urlunsplit((base_parts.scheme, base_parts.netloc, path, "", ""))
-        else:
-            candidate = urljoin(base, path)
+        candidate = urljoin(base, path.lstrip("/"))
         if not candidate.endswith("/"):
             candidate += "/"
         self._validate_absolute(candidate, expected_root=None)
@@ -162,7 +160,18 @@ class WebDAVManager:
 
     def validate_href(self, href: str, orientation: Orientation) -> str:
         root = self._roots[orientation]
-        absolute = urljoin(root, href)
+        parsed = urlsplit(href)
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise UnsafeHrefError("unsafe WebDAV href")
+        if href.startswith("//"):
+            raise UnsafeHrefError("cross-host WebDAV href")
+        if parsed.scheme or parsed.netloc:
+            absolute = href
+        elif parsed.path.startswith("/"):
+            base = urlsplit(self._base_url)
+            absolute = urlunsplit((base.scheme, base.netloc, parsed.path, "", ""))
+        else:
+            absolute = urljoin(root, href)
         return self._validate_absolute(absolute, root)
 
     def _read_limited(self, response: httpx.Response, limit: int) -> bytes:
