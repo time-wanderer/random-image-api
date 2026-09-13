@@ -41,6 +41,7 @@
 
 - 新增：`app/chunked_upload.py`、`tests/test_chunked_upload.py`、`docs/CHUNKED_UPLOAD.md`。
 - 修改：`app/admin.py`、`app/admin_upload.js`、`app/config.py`、`app/db.py`、`app/__init__.py`、`.env.example`、相关测试及公开文档。
+- 本次 WebDAV 路径修复修改：`app/webdav.py`、`tests/test_webdav.py`、`.env.example`、`README.md`、`DOCKERHUB_OVERVIEW.md`、`REPORT.md`。
 - 本轮 Backup/Restore 安全增量明确修改 `scripts/backup.sh`、`scripts/restore.sh`、`README.md`、`MIGRATION.md`、`REPORT.md`，并新增 `tests/test_backup_restore_scripts.py`；未覆盖或改写其他功能文件。
 
 ## 实际执行的检查
@@ -51,6 +52,7 @@
 - `python -m py_compile ...`：通过。
 - `bash -n scripts/backup.sh scripts/restore.sh scripts/build-image.sh` 与 `sh -n docker-entrypoint.sh`：通过。
 - `git diff --check`：通过。
+- WebDAV 基础路径修复后重新执行 `tests/test_webdav.py`：`28 passed`；完整 pytest、Python 编译、Node 语法检查和 `git diff --check` 均通过。远程隔离容器解析出的方向根目录保留 `WEBDAV_BASE_URL` 路径前缀，确认带路径 WebDAV 配置可用。
 - `/opt/venv/bin/python -m unittest -v tests.test_backup_restore_scripts`：8 项隔离集成测试通过；使用临时项目与 `PATH` fake docker，未调用真实 Docker。覆盖 Backup/Restore 在线拒绝、Compose 状态不可确认时 Backup 默认拒绝及显式 override、缺少图库、缺少数据库、超过总展开量、危险空间倍率、重复成员、符号链接、路径逃逸、脚本生成备份再恢复、成功恢复后清空 `upload_tasks` 和分片临时目录，以及最终删除 chunked 失败时图库、旧数据库与旧任务文件一致回滚。
 - `/opt/venv/bin/python -m py_compile tests/test_backup_restore_scripts.py`：通过。
 - 最终使用 `set -Eeuo pipefail` 严格执行 10 阶段检查：`compileall`、目标 `py_compile`、Node 行为测试、Node 语法、Shell 语法、8 项脚本集成测试、脚本 `0755` 权限、版本/schema/NUL 源码守卫、公开内容与 UTF-8 扫描、`git diff --check`；全部通过，末尾输出 `STRICT_FINAL_CHECKS_OK`。
@@ -69,6 +71,12 @@
 - 远程测试容器必须清除镜像继承的生产目录环境变量后再运行 pytest，避免 `CACHE_DIR=/app/data/cache/webdav` 等生产默认值污染临时目录配置测试。推荐命令：`env -u DATA_DIR -u IMAGES_DIR -u DATABASE_PATH -u LOG_DIR -u CACHE_DIR -u UPLOAD_TMP_DIR python -m pytest -q`。这属于测试进程环境隔离，不是产品逻辑修复。
 
 ## 已解决问题
+
+### WebDAV 基础路径兼容修复
+
+修复 WebDAV 基础地址包含路径前缀时的目录拼接问题。此前 `/desktop/` 和 `/mobile/` 会被错误解释为域名根路径，导致配置为 `https://host.example/webdav/library/` 时实际请求错误地变成 `https://host.example/desktop/`。现在两个方向目录始终相对于 `WEBDAV_BASE_URL` 拼接；前导 `/` 仅表示配置兼容写法，不会丢弃基础地址路径。远端返回的相对 HREF、包含基础路径的绝对路径 HREF 均经过同主机、配置根目录、协议、查询参数、片段和路径穿越安全校验。
+
+本次新增带路径基础地址的 WebDAV 回归测试，验证方向根目录、相对 HREF、包含基础路径的 HREF，以及跨方向、跨主机和错误路径均符合预期。定向测试 `tests/test_webdav.py` 共 `28 passed`；随后完整 pytest、Python 编译、JavaScript 语法检查和 `git diff --check` 均通过。远程隔离容器验收确认 WebDAV 根目录解析为基础地址下的 `desktop/`、`mobile/` 子目录，未访问生产数据或生产容器。
 
 单请求归档不再是大归档网页上传的唯一选择；普通 multipart 上限与分片应用总上限分离；上传位置可持久恢复；服务端 offset 成为进度权威；分片 `413` 可按服务端能力自动降为 4/2/1 MiB；临时数据不需要 part 合并；确认导入成功后及时清理。页面刷新后不会自动取得本地文件，用户需在同一浏览器重新选择同一文件；管理 Session 过期后可重新登录续传，有效 owner Cookie 临近过期时会保持同一 owner 身份滚动续签。换浏览器、清除 owner Cookie、Cookie 已失效或轮换 `ADMIN_SESSION_SECRET` 后不能接管旧任务。
 

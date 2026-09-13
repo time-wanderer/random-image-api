@@ -109,7 +109,7 @@ WEBDAV_USERNAME=your-webdav-user
 WEBDAV_PASSWORD=your-webdav-password
 ```
 
-`WEBDAV_DESKTOP_ROOT` 和 `WEBDAV_MOBILE_ROOT` 已有 `/desktop/`、`/mobile/` 默认值，通常无需修改。保存后执行：
+`WEBDAV_DESKTOP_ROOT` 和 `WEBDAV_MOBILE_ROOT` 默认分别为 `/desktop/`、`/mobile/`，表示 `WEBDAV_BASE_URL` 下面的子目录，而不是域名根路径。例如 `WEBDAV_BASE_URL=https://dav.example.com/random-image-api/` 时，程序实际访问 `/random-image-api/desktop/` 和 `/random-image-api/mobile/`。保存后执行：
 
 ```bash
 docker compose up -d --force-recreate
