@@ -466,6 +466,32 @@ def test_maintenance_randomly_marks_percentage_for_conditional_refresh(
         manager.close()
 
 
+def test_propfind_skips_queried_collection_and_indexes_child(tmp_path: Path) -> None:
+    def propfind_with_self(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PROPFIND"
+        body = ("<?xml version='1.0'?><d:multistatus xmlns:d='DAV:'>"
+                "<d:response><d:href>/desktop/</d:href><d:propstat>"
+                "<d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>"
+                "<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
+                "<d:response><d:href>/desktop/wide.png</d:href><d:propstat>"
+                "<d:prop><d:getcontentlength>256</d:getcontentlength>"
+                "<d:getcontenttype>image/png</d:getcontenttype><d:resourcetype/>"
+                "</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>"
+                "</d:response></d:multistatus>").encode()
+        return httpx.Response(207, content=body)
+
+    settings = webdav_settings(tmp_path)
+    manager = WebDAVManager(settings, transport=httpx.MockTransport(propfind_with_self))
+    try:
+        items, collections = manager._propfind_url(manager._roots["desktop"], "desktop", None)
+        assert collections == []
+        assert [item["href"] for item in items] == [
+            "https://dav.example.test/desktop/wide.png"
+        ]
+    finally:
+        manager.close()
+
+
 def test_remote_403_as_only_source_returns_503(tmp_path: Path) -> None:
     def forbidden(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(403)

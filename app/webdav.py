@@ -159,6 +159,10 @@ class WebDAVManager:
         return normalized
 
     def validate_href(self, href: str, orientation: Orientation) -> str:
+        absolute = self._resolve_href(href, orientation)
+        return self._validate_absolute(absolute, self._roots[orientation])
+
+    def _resolve_href(self, href: str, orientation: Orientation) -> str:
         root = self._roots[orientation]
         parsed = urlsplit(href)
         if parsed.username or parsed.password or parsed.query or parsed.fragment:
@@ -172,7 +176,7 @@ class WebDAVManager:
             absolute = urlunsplit((base.scheme, base.netloc, parsed.path, "", ""))
         else:
             absolute = urljoin(root, href)
-        return self._validate_absolute(absolute, root)
+        return self._validate_absolute(absolute, None)
 
     def _read_limited(self, response: httpx.Response, limit: int) -> bytes:
         chunks: list[bytes] = []
@@ -306,7 +310,14 @@ class WebDAVManager:
             href_node = node.find("{DAV:}href")
             if href_node is None or not href_node.text:
                 continue
-            href = self.validate_href(href_node.text.strip(), orientation)
+            href = self._resolve_href(href_node.text.strip(), orientation)
+            href = self._validate_absolute(href, None)
+            # WebDAV Depth: 1 responses normally include the collection being
+            # queried. Validate it first, then ignore that collection itself;
+            # only children are candidates for indexing.
+            if urlsplit(href).path.rstrip("/") == base_path.rstrip("/"):
+                continue
+            href = self._validate_absolute(href, root)
             prop = None
             for propstat in node.findall("{DAV:}propstat"):
                 if " 200 " in (propstat.findtext("{DAV:}status") or ""):
