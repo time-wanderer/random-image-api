@@ -39,6 +39,12 @@ class UnsafeHrefError(WebDAVError):
     pass
 
 
+class WebDAVHTTPError(WebDAVError):
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"remote storage returned HTTP {status_code}")
+        self.status_code = status_code
+
+
 @dataclass(frozen=True, slots=True)
 class CachedImage:
     href: str
@@ -198,7 +204,11 @@ class WebDAVManager:
         if 300 <= response.status_code < 400 and response.status_code != 304:
             response.close()
             raise WebDAVError("remote redirect refused")
-        if response.status_code in {401, 403} or response.status_code >= 500:
+        if response.status_code in {401, 403}:
+            status_code = response.status_code
+            response.close()
+            raise WebDAVHTTPError(status_code)
+        if response.status_code >= 500:
             response.close()
             raise WebDAVError("remote storage unavailable")
         return response
@@ -403,23 +413,50 @@ class WebDAVManager:
                 headers["If-None-Match"] = cached["etag"]
             if cached["last_modified"]:
                 headers["If-Modified-Since"] = cached["last_modified"]
-        response = self._request("GET", safe_href, headers=headers)
-        try:
-            if response.status_code == 304 and cached is not None:
-                image = self._cached_image(cached)
-                if image is None:
-                    raise WebDAVError("cached image is missing")
-                with db.get_conn(self.settings.database_path) as conn:
-                    conn.execute(
-                        "UPDATE webdav_cache SET fetched_at=?, accessed_at=? WHERE href=?",
-                        (now, now, safe_href),
-                    )
-                return image
-            if response.status_code != 200:
-                raise WebDAVError("remote image download failed")
-            return self._store_response(response, safe_href, orientation, now)
-        finally:
-            response.close()
+        download_urls = self._download_urls(safe_href)
+        last_error: WebDAVError | None = None
+        for index, download_url in enumerate(download_urls):
+            try:
+                response = self._request("GET", download_url, headers=headers)
+            except WebDAVHTTPError as exc:
+                last_error = exc
+                if index + 1 < len(download_urls):
+                    continue
+                raise
+            try:
+                if response.status_code == 304 and cached is not None:
+                    image = self._cached_image(cached)
+                    if image is None:
+                        raise WebDAVError("cached image is missing")
+                    with db.get_conn(self.settings.database_path) as conn:
+                        conn.execute(
+                            "UPDATE webdav_cache SET fetched_at=?, accessed_at=? WHERE href=?",
+                            (now, now, safe_href),
+                        )
+                    return image
+                if response.status_code != 200:
+                    raise WebDAVError("remote image download failed")
+                return self._store_response(response, safe_href, orientation, now)
+            finally:
+                response.close()
+        if last_error is not None:
+            raise last_error
+        raise WebDAVError("remote image download failed")
+
+    def _download_urls(self, safe_href: str) -> list[str]:
+        """Return one bounded compatibility variant for broken DAV gateways."""
+        urls = [safe_href]
+        parsed = urlsplit(safe_href)
+        path = parsed.path
+        has_non_ascii_escape = any(
+            int(path[index + 1:index + 3], 16) >= 0x80
+            for index, char in enumerate(path[:-2])
+            if char == "%"
+            and all(c in "0123456789abcdefABCDEF" for c in path[index + 1:index + 3])
+        )
+        if has_non_ascii_escape:
+            urls.append(urlunsplit((parsed.scheme, parsed.netloc, path.replace("%", "%25"), "", "")))
+        return urls
 
     def _store_response(
         self, response: httpx.Response, href: str, orientation: Orientation, now: float

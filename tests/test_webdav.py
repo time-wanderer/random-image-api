@@ -492,6 +492,37 @@ def test_propfind_skips_queried_collection_and_indexes_child(tmp_path: Path) -> 
         manager.close()
 
 
+def test_non_ascii_download_retries_one_compatibility_url(tmp_path: Path) -> None:
+    image = image_bytes((60, 120), fmt="JPEG")
+    requests: list[str] = []
+    canonical = "https://dav.example.test/mobile/%E3%82%AD%E3%83%A5.jpg"
+    compatibility = "https://dav.example.test/mobile/%25E3%2582%25AD%25E3%2583%25A5.jpg"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PROPFIND":
+            return httpx.Response(207, content=multistatus(False, False))
+        requests.append(str(request.url))
+        if str(request.url) == canonical:
+            return httpx.Response(401)
+        if str(request.url) == compatibility:
+            return httpx.Response(200, content=image, headers={"Content-Type": "image/jpeg"})
+        raise AssertionError(f"unexpected URL: {request.url}")
+
+    manager = WebDAVManager(
+        webdav_settings(tmp_path),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = manager.fetch_href("/mobile/%E3%82%AD%E3%83%A5.jpg", "mobile")
+        assert result.source == "webdav-live"
+        assert requests == [canonical, compatibility]
+        with db.get_conn(manager.settings.database_path) as conn:
+            row = conn.execute("SELECT href FROM webdav_cache").fetchone()
+        assert row["href"] == canonical
+    finally:
+        manager.close()
+
+
 def test_remote_403_as_only_source_returns_503(tmp_path: Path) -> None:
     def forbidden(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(403)
